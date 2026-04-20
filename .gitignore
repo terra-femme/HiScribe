@@ -1,0 +1,43 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Docs (educational notes, changelogs — not part of the public repo)
+docs/
+
+# Dependencies
+node_modules/
+gateway/node_modules/
+client/node_modules/
+
+# Python
+pipeline/venv/
+pipeline/__pycache__/
+pipeline/**/__pycache__/
+pipeline/**/**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Build output
+gateway/dist/
+client/dist/
+
+# SQLite database and audio files (runtime data, not source)
+data/
+
+# ML model weights (large binary files — track separately or use model registry)
+pipeline/models/**/weights.pt
+pipeline/models/**/weights.keras
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

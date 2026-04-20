@@ -1,0 +1,30 @@
+services:
+  gateway:
+    build: ./gateway
+    ports:
+      - '3000:3000'
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./schema.sql:/schema.sql
+    depends_on:
+      - pipeline
+
+  pipeline:
+    build:
+      context: .
+      dockerfile: pipeline/Dockerfile
+    ports:
+      - '8000:8000'
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./schema.sql:/app/schema.sql
+      - ./schema.sql:/schema.sql
+
+  client:
+    build: ./client
+    ports:
+      - '8080:8080'
+    depends_on:
+      - gateway

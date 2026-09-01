@@ -10,9 +10,11 @@ from pydantic import BaseModel
 from db.enrollment import delete_enrollment, get_active_enrollments, save_enrollment
 from db.sqlite import (add_amendment, approve_session, delete_segment,
                        edit_segment, get_review_payload, init_db,
-                       remap_segment)
+                       remap_segment, save_fhir_bundle)
 from graph.pipeline import run_pipeline
 from adapters.enrollment_embedding import build_enrollment_profile, encrypt_embedding
+from interop.builder import build_bundle
+from interop.client import send_bundle
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +69,42 @@ class ApproveRequest(BaseModel):
 @app.post('/session/{session_id}/approve')
 def approve(session_id: str, req: ApproveRequest):
     approve_session(session_id, req.provider_npi, req.patient_mrn, req.visit_type)
-    return {'status': 'approved', 'session_id': session_id}
+
+    # FHIR emission is deliberately non-fatal. The provider has already
+    # approved the note and the approval is committed; a serialisation or
+    # delivery failure must not undo that or surface as a failed approval.
+    # The bundle is derived state and can always be rebuilt from the DB.
+    fhir: dict = {'status': 'skipped', 'detail': None}
+    try:
+        payload = get_review_payload(session_id)
+        if not payload:
+            logger.error(
+                '[approve] No review payload for session=%s — FHIR skipped',
+                session_id
+            )
+            fhir = {'status': 'error', 'detail': 'review payload not found'}
+        else:
+            bundle_json = build_bundle(payload).model_dump_json(exclude_none=True)
+            result = send_bundle(session_id, bundle_json)
+            save_fhir_bundle(
+                session_id,
+                bundle_json,
+                destination=result.get('destination'),
+                status=result.get('status', 'generated'),
+            )
+            fhir = {'status': result.get('status'), 'detail': result.get('detail')}
+            logger.info(
+                '[approve] FHIR bundle emitted session=%s status=%s dest=%s',
+                session_id, fhir['status'], result.get('destination')
+            )
+    except Exception as exc:
+        logger.error(
+            '[approve] FHIR generation FAILED session=%s: %s — approval stands, '
+            'bundle can be re-emitted', session_id, exc, exc_info=True
+        )
+        fhir = {'status': 'error', 'detail': str(exc)}
+
+    return {'status': 'approved', 'session_id': session_id, 'fhir': fhir}
 
 
 class RemapRequest(BaseModel):

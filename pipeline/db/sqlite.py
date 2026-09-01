@@ -107,6 +107,42 @@ def approve_session(session_id: str, provider_npi: str, patient_mrn: str, visit_
         })
 
 
+def save_fhir_bundle(session_id: str, bundle_json: str, destination: str | None,
+                     status: str = 'generated', fhir_version: str = 'R4B'):
+    """Persist a generated FHIR bundle and record the fact in the audit log.
+
+    The bundle row is replaced on re-emission (derived state), while the audit
+    entry is appended (history). The audit payload deliberately carries only
+    metadata — never the bundle body, which contains PHI and would bloat the
+    append-only log.
+    """
+    with _conn() as conn:
+        conn.execute(
+            '''INSERT INTO fhir_bundles (session_id, bundle_json, fhir_version, status, destination)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(session_id) DO UPDATE SET
+                 bundle_json  = excluded.bundle_json,
+                 fhir_version = excluded.fhir_version,
+                 status       = excluded.status,
+                 destination  = excluded.destination''',
+            (session_id, bundle_json, fhir_version, status, destination)
+        )
+        _append_audit(conn, session_id, 'fhir_generated', payload={
+            'status':       status,
+            'fhir_version': fhir_version,
+            'destination':  destination,
+            'bytes':        len(bundle_json),
+        })
+
+
+def get_fhir_bundle(session_id: str) -> dict | None:
+    with _conn() as conn:
+        row = conn.execute(
+            'SELECT * FROM fhir_bundles WHERE session_id = ?', (session_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def remap_segment(segment_id: str, session_id: str, from_section: str, to_section: str, provider_id: str):
     with _conn() as conn:
         conn.execute(

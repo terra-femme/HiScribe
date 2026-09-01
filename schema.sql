@@ -69,6 +69,20 @@ CREATE TABLE IF NOT EXISTS provider_enrollments (
   updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- FHIR bundles generated on approval. One row per session; re-emission replaces
+-- it, since the bundle is derived state that can always be rebuilt from
+-- sessions + segments + amendments. This is NOT an audit record — the audit
+-- trail lives in audit_log and stays append-only.
+CREATE TABLE IF NOT EXISTS fhir_bundles (
+  session_id   TEXT PRIMARY KEY,
+  bundle_json  TEXT NOT NULL,
+  fhir_version TEXT NOT NULL DEFAULT 'R4B',
+  status       TEXT NOT NULL DEFAULT 'generated',
+  destination  TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
 -- Indexes on hot-path queries
 -- segments: pipeline reads final segments per session on every pipeline run
 CREATE INDEX IF NOT EXISTS idx_segments_session_final

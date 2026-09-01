@@ -83,6 +83,42 @@ CREATE TABLE IF NOT EXISTS fhir_bundles (
   FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 
+-- Patient context received from an inbound ADT feed via the Mirth ADT_Inbound
+-- channel. Keyed on MRN because ADT arrives BEFORE a HiScribe session exists —
+-- registration happens at the front desk, the recording happens in the room.
+-- Latest write wins; this is current-state, not history. The audit trail of
+-- what arrived when lives in audit_log.
+CREATE TABLE IF NOT EXISTS patient_context (
+  mrn                 TEXT PRIMARY KEY,
+  assigning_authority TEXT,
+  family_name         TEXT,
+  given_name          TEXT,
+  birth_date          TEXT,
+  administrative_sex  TEXT,
+  patient_class       TEXT,
+  attending_npi       TEXT,
+  visit_number        TEXT,
+  trigger_event       TEXT,
+  message_control_id  TEXT,
+  received_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Charges suggested for a session and, once a provider confirms, posted to the
+-- billing system as DFT^P03. Suggestion and confirmation are separate audit
+-- events because an E/M level is a billing determination with legal weight.
+CREATE TABLE IF NOT EXISTS charges (
+  session_id    TEXT PRIMARY KEY,
+  cpt_code      TEXT NOT NULL,
+  icd10_codes   TEXT NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'planned',
+  confirmed_by  TEXT,
+  confirmed_at  TEXT,
+  bundle_json   TEXT,
+  destination   TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
 -- Indexes on hot-path queries
 -- segments: pipeline reads final segments per session on every pipeline run
 CREATE INDEX IF NOT EXISTS idx_segments_session_final

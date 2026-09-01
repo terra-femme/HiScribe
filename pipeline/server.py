@@ -10,11 +10,14 @@ from pydantic import BaseModel
 from db.enrollment import delete_enrollment, get_active_enrollments, save_enrollment
 from db.sqlite import (add_amendment, approve_session, delete_segment,
                        edit_segment, get_review_payload, init_db,
-                       remap_segment, save_fhir_bundle)
+                       remap_segment, save_charge, save_fhir_bundle,
+                       get_patient_context, save_patient_context)
 from graph.pipeline import run_pipeline
 from adapters.enrollment_embedding import build_enrollment_profile, encrypt_embedding
 from interop.builder import build_bundle
+from interop.charge import build_charge_bundle
 from interop.client import send_bundle
+from interop.charge_client import send_charge
 
 logger = logging.getLogger(__name__)
 
@@ -216,3 +219,133 @@ def remove_enrollment(provider_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail=f'Provider {provider_id!r} not found')
     return {'status': 'deleted', 'provider_id': provider_id}
+
+
+# ── Interop: inbound ADT ─────────────────────────────────────────────────────
+
+class PatientContext(BaseModel):
+    """Patient context posted by the Mirth ADT_Inbound channel.
+
+    Field names mirror the JSON that `mirth/transformers/adt_inbound.js`
+    produces. Everything except `mrn` is optional because a real ADT feed is
+    inconsistent about what it populates, and rejecting a whole message for a
+    missing middle name would be worse than storing what did arrive.
+    """
+    mrn: str
+    assigningAuthority: str | None = None
+    familyName: str | None = None
+    givenName: str | None = None
+    birthDate: str | None = None
+    administrativeSex: str | None = None
+    patientClass: str | None = None
+    attendingNpi: str | None = None
+    visitNumber: str | None = None
+    triggerEvent: str | None = None
+    messageControlId: str | None = None
+
+
+@app.post('/fhir/patient-context')
+def receive_patient_context(ctx: PatientContext):
+    """Accept patient demographics derived from an inbound ADT message.
+
+    Called by Mirth, not by a browser. Returning 4xx here makes the ADT_Inbound
+    channel record an error, which is the correct behaviour: a demographic
+    update that could not be stored must not be silently acknowledged.
+    """
+    logger.info(
+        '[patient-context] %s mrn=%s class=%s control=%s',
+        ctx.triggerEvent, ctx.mrn, ctx.patientClass, ctx.messageControlId
+    )
+    try:
+        save_patient_context(ctx.model_dump())
+    except ValueError as exc:
+        logger.error('[patient-context] Rejected: %s', exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error('[patient-context] FAILED to store mrn=%s: %s',
+                     ctx.mrn, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail='could not store patient context')
+    return {'status': 'stored', 'mrn': ctx.mrn}
+
+
+@app.get('/fhir/patient-context/{mrn}')
+def read_patient_context(mrn: str):
+    context = get_patient_context(mrn)
+    if not context:
+        raise HTTPException(status_code=404, detail=f'No patient context for MRN {mrn!r}')
+    return context
+
+
+# ── Interop: coded charge capture ────────────────────────────────────────────
+
+class ChargeRequest(BaseModel):
+    cpt_code: str
+    icd10_codes: list[str]
+    # Present only on confirmation. Its absence is what keeps a charge planned.
+    confirmed_by: str | None = None
+
+
+@app.post('/session/{session_id}/charge/suggest')
+def suggest_charge(session_id: str, req: ChargeRequest):
+    """Record a proposed charge. Never billable, never sent downstream.
+
+    The provider is the accountable party for an E/M level. This endpoint exists
+    so a suggestion is captured and auditable, not so it can be billed.
+    """
+    payload = get_review_payload(session_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail=f'Unknown session {session_id!r}')
+    try:
+        bundle = build_charge_bundle(
+            payload['session'], req.icd10_codes, req.cpt_code, confirmed_by=None
+        )
+    except ValueError as exc:
+        logger.error('[charge.suggest] session=%s rejected: %s', session_id, exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    save_charge(session_id, req.cpt_code, req.icd10_codes, status='planned')
+    logger.info('[charge.suggest] session=%s cpt=%s icd10=%s (NOT billable)',
+                session_id, req.cpt_code, req.icd10_codes)
+    return {'status': 'planned', 'session_id': session_id,
+            'bundle': bundle.model_dump(exclude_none=True)}
+
+
+@app.post('/session/{session_id}/charge/confirm')
+def confirm_charge(session_id: str, req: ChargeRequest):
+    """Provider confirms the charge; only now is it billable and posted.
+
+    `confirmed_by` is required. Without it there is no accountable author for a
+    billing determination, and the charge stays planned.
+    """
+    if not req.confirmed_by:
+        raise HTTPException(
+            status_code=400,
+            detail='confirmed_by is required — a charge cannot be billed without '
+                   'an identified provider taking responsibility for the level'
+        )
+    payload = get_review_payload(session_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail=f'Unknown session {session_id!r}')
+
+    try:
+        bundle = build_charge_bundle(
+            payload['session'], req.icd10_codes, req.cpt_code,
+            confirmed_by=req.confirmed_by
+        )
+    except ValueError as exc:
+        logger.error('[charge.confirm] session=%s rejected: %s', session_id, exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    bundle_json = bundle.model_dump_json(exclude_none=True)
+    # Delivery is non-fatal for the same reason note emission is: the provider's
+    # confirmation is a recorded fact, and a billing system being unreachable
+    # must not erase it. The charge is persisted and can be re-posted.
+    result = send_charge(session_id, bundle_json)
+    save_charge(session_id, req.cpt_code, req.icd10_codes, status='billable',
+                confirmed_by=req.confirmed_by, bundle_json=bundle_json,
+                destination=result.get('destination'))
+
+    logger.info('[charge.confirm] session=%s cpt=%s by=%s delivery=%s',
+                session_id, req.cpt_code, req.confirmed_by, result.get('status'))
+    return {'status': 'billable', 'session_id': session_id,
+            'confirmed_by': req.confirmed_by, 'delivery': result}

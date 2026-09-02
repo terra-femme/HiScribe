@@ -1,0 +1,73 @@
+name: Security
+
+# Runs on every pull request into main, before merge. This is the gate: code
+# reaches main through a reviewed PR with these checks green, never by a direct
+# push. Also runs weekly so a newly disclosed CVE in a dependency surfaces
+# without waiting for the next change.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          language: ${{ matrix.language }}
+          queries: security-and-quality
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
+
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - run: semgrep scan --config=p/default --config=p/secrets --error --skip-unknown-extensions .
+
+  bandit:
+    name: Bandit (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install bandit[toml]
+      # -ll reports medium severity and above, which skips B101 (assert) so the
+      # test suite can be scanned rather than excluded from the gate.
+      - run: bandit -r pipeline mirth -ll
+
+  licence-guard:
+    name: No CPT descriptors committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # CPT is copyrighted by the AMA and its descriptors may not be
+      # redistributed. config/cpt_codes.json is gitignored; this fails the build
+      # if it is ever committed anyway.
+      - name: Fail if config/cpt_codes.json is tracked
+        run: |
+          if git ls-files --error-unmatch config/cpt_codes.json > /dev/null 2>&1; then
+            echo "::error::config/cpt_codes.json is tracked. CPT descriptors are AMA-licensed and must not be committed."
+            exit 1
+          fi
+          echo "OK: no CPT code table in version control."

@@ -177,8 +177,8 @@ def db(tmp_path, monkeypatch):
 
 def test_reemission_replaces_bundle_but_appends_audit(db):
     """Bundle is derived state (replace); audit is history (append-only)."""
-    db.save_fhir_bundle('sess-1', '{"a":1}', destination='/tmp/a.json')
-    db.save_fhir_bundle('sess-1', '{"b":2}', destination='/tmp/b.json')
+    db.save_fhir_bundle('sess-1', '{"a":1}', destination='http://mirth.test/note/')
+    db.save_fhir_bundle('sess-1', '{"b":2}', destination='http://mirth.test/note/b')
 
     with db._conn() as c:
         bundles = c.execute(
@@ -196,7 +196,7 @@ def test_reemission_replaces_bundle_but_appends_audit(db):
 def test_audit_payload_excludes_bundle_body(db):
     """The append-only log must not accumulate PHI or megabytes of JSON."""
     body = '{"secret":"' + 'x' * 5000 + '"}'
-    db.save_fhir_bundle('sess-1', body, destination='/tmp/a.json')
+    db.save_fhir_bundle('sess-1', body, destination='http://mirth.test/note/')
     with db._conn() as c:
         payload = c.execute(
             "SELECT payload FROM audit_log WHERE event_type='fhir_generated'"

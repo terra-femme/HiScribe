@@ -13,9 +13,8 @@ classes inside nextgenhealthcare/connect:4.4.2.
 
 import glob
 import os
-import xml.etree.ElementTree as ET
-
 import pytest
+from defusedxml import ElementTree as ET
 
 CHANNEL_DIR = os.path.normpath(
     os.path.join(os.path.dirname(__file__), '..', '..', 'mirth', 'channels')

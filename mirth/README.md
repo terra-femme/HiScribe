@@ -46,7 +46,11 @@ practice-management system, built on [Mirth Connect](https://github.com/nextgenh
 |---|---|
 | Docker Desktop | running — the whole stack is containerised |
 | Python | 3.13 for the tooling in `mirth/tools/` |
-| `requests` | `pip install requests` (used by the deploy tool) |
+| `requests`, `defusedxml` | `pip install requests defusedxml` (used by the deploy tool) |
+
+`dev_context_listener.py` binds loopback by default. It needs `--host 0.0.0.0`
+to accept connections from the Mirth container, since `host.docker.internal`
+does not resolve to `127.0.0.1` from inside it.
 
 The image is ~1.9 GB and is pulled on first start.
 
@@ -102,7 +106,7 @@ You should get `MSA|AA|<control id>` back. To see it land in the database, run
 the development listener in another terminal first:
 
 ```powershell
-python mirth/tools/dev_context_listener.py --db data/hiscribe_dev.db
+python mirth/tools/dev_context_listener.py --db data/hiscribe_dev.db --host 0.0.0.0
 ```
 
 (The real endpoint is `POST /fhir/patient-context` in `pipeline/server.py`.

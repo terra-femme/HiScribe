@@ -71,7 +71,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--host', default='0.0.0.0')
+    # Loopback by default. Mirth runs in a container and reaches the host
+    # through host.docker.internal, which does not resolve to 127.0.0.1 from
+    # inside the container, so the Docker path needs --host 0.0.0.0. Binding
+    # every interface is a deliberate choice, not a default.
+    parser.add_argument('--host', default='127.0.0.1',
+                        help='use 0.0.0.0 to accept connections from the Mirth container')
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--db', default=None,
                         help='SQLite path; sets DB_PATH for db.sqlite')

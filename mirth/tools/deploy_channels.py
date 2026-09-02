@@ -34,13 +34,16 @@ import os
 import re
 import sys
 import time
-import xml.etree.ElementTree as ET
-
 try:
+    # defusedxml, not the stdlib parser: statuses() and _verify() parse XML that
+    # arrives over the network from the Mirth server. The stdlib parser expands
+    # entities, so a hostile or compromised response could exhaust memory
+    # (billion laughs) or read local files via an external entity.
+    from defusedxml import ElementTree as ET
     import requests
     import urllib3
-except ImportError:
-    sys.exit('requests is required: pip install requests')
+except ImportError as exc:
+    sys.exit(f'missing dependency ({exc.name}): pip install requests defusedxml')
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 

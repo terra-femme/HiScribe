@@ -10,6 +10,11 @@ Sink contract — any implementation must expose:
          'detail': str | None}
         Must not raise. Delivery failure is reported, never thrown.
 
+        `detail` carries the downstream ACK code on success and a short,
+        non-sensitive category on failure — never raw exception text. It can
+        reach an API caller, and a transport error string embeds internal
+        hostnames, ports and file paths. The full message goes to the log.
+
 Active sink:
 """
 

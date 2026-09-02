@@ -81,7 +81,12 @@ def _post(url: str, channel: str, session_id: str, bundle_json: str) -> dict:
             '(approval stands; bundle is persisted and can be re-sent)',
             scrub(session_id), scrub(url), scrub(exc), exc_info=True
         )
-        return {'status': 'error', 'destination': url, 'detail': str(exc)}
+        # The exception TYPE, not its text. `detail` travels back through the
+        # approve endpoint to an API caller, and a transport exception string
+        # can carry internal hostnames, ports and file paths. The full message
+        # is in the log line above.
+        return {'status': 'error', 'destination': url,
+                'detail': f'transport error ({type(exc).__name__})'}
 
     body = (response.text or '').strip()
     if response.status_code >= 400:
@@ -92,7 +97,9 @@ def _post(url: str, channel: str, session_id: str, bundle_json: str) -> dict:
         return {
             'status': 'error',
             'destination': url,
-            'detail': f'HTTP {response.status_code}: {body[:300]}',
+            # Status code only. The response body comes from the interface
+            # engine and is logged above, but it is not the caller's to see.
+            'detail': f'rejected by interface engine (HTTP {response.status_code})',
         }
 
     # The channel returns the downstream ACK. MSA-1 = AA means the receiving

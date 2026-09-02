@@ -11,6 +11,9 @@ Sink contract — any implementation must expose:
         Must not raise. A billing system being unreachable is an operational
         problem, not a reason to discard a provider's confirmation.
 
+        `detail` carries the downstream ACK code on success and a short,
+        non-sensitive category on failure — never raw exception text.
+
 Active sink:
 """
 

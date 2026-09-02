@@ -43,7 +43,9 @@ def send_bundle(session_id: str, bundle_json: str) -> dict:
             '[interop.local_file] FAILED to write bundle session=%s path=%s: %s',
             session_id, path, exc, exc_info=True
         )
-        return {'status': 'error', 'destination': path, 'detail': str(exc)}
+        # Type, not text: an OSError message embeds the full filesystem path.
+        return {'status': 'error', 'destination': path,
+                'detail': f'write failed ({type(exc).__name__})'}
 
     logger.info('[interop.local_file] Bundle written session=%s', session_id)
     return {'status': 'written', 'destination': path, 'detail': None}

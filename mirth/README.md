@@ -80,8 +80,13 @@ Channels are **not** baked into the image.
 
 ```powershell
 python mirth/tools/build_channels.py
-python mirth/tools/deploy_channels.py
+python mirth/tools/deploy_channels.py --insecure
 ```
+
+`--insecure` skips TLS verification. Mirth generates a self-signed certificate
+on first boot, so a local development server needs it. Verification is **on by
+default** — a real server should be reached with `--ca-bundle <path>` instead,
+never by disabling the check.
 
 Expected final lines:
 
@@ -102,7 +107,10 @@ Anything other than `STARTED` is a real failure — see *Troubleshooting*.
 python mirth/tools/send_adt.py --mrn MRN990011 --family ALVAREZ --given MARIA
 ```
 
-You should get `MSA|AA|<control id>` back. To see it land in the database, run
+You should get `MSA|AA|<control id>` back. The printed message masks PID-5
+(name) and PID-7 (birth date); pass `--show-phi` to see them. The data is
+synthetic either way — the default exists so that printing PHI-shaped fields
+never becomes the habit. To see it land in the database, run
 the development listener in another terminal first:
 
 ```powershell
@@ -284,6 +292,6 @@ curl.exe -sk -u admin:admin -H "X-Requested-With: cli" `
 ## Reset
 
 ```powershell
-python mirth/tools/deploy_channels.py --undeploy
+python mirth/tools/deploy_channels.py --undeploy --insecure
 docker compose down mirth          # add -v to discard the Derby database too
 ```

@@ -15,6 +15,7 @@ from db.sqlite import (add_amendment, approve_session, delete_segment,
 from graph.pipeline import run_pipeline
 from adapters.enrollment_embedding import build_enrollment_profile, encrypt_embedding
 from interop.builder import build_bundle
+from interop.logsafe import scrub
 from interop.charge import build_charge_bundle
 from interop.client import send_bundle
 from interop.charge_client import send_charge
@@ -83,7 +84,7 @@ def approve(session_id: str, req: ApproveRequest):
         if not payload:
             logger.error(
                 '[approve] No review payload for session=%s — FHIR skipped',
-                session_id
+                scrub(session_id)
             )
             fhir = {'status': 'error', 'detail': 'review payload not found'}
         else:
@@ -98,12 +99,12 @@ def approve(session_id: str, req: ApproveRequest):
             fhir = {'status': result.get('status'), 'detail': result.get('detail')}
             logger.info(
                 '[approve] FHIR bundle emitted session=%s status=%s dest=%s',
-                session_id, fhir['status'], result.get('destination')
+                scrub(session_id), scrub(fhir['status']), scrub(result.get('destination'))
             )
     except Exception as exc:
         logger.error(
             '[approve] FHIR generation FAILED session=%s: %s — approval stands, '
-            'bundle can be re-emitted', session_id, exc, exc_info=True
+            'bundle can be re-emitted', scrub(session_id), scrub(exc), exc_info=True
         )
         fhir = {'status': 'error', 'detail': str(exc)}
 
@@ -254,16 +255,21 @@ def receive_patient_context(ctx: PatientContext):
     """
     logger.info(
         '[patient-context] %s mrn=%s class=%s control=%s',
-        ctx.triggerEvent, ctx.mrn, ctx.patientClass, ctx.messageControlId
+        scrub(ctx.triggerEvent), scrub(ctx.mrn), scrub(ctx.patientClass),
+        scrub(ctx.messageControlId)
     )
     try:
         save_patient_context(ctx.model_dump())
     except ValueError as exc:
-        logger.error('[patient-context] Rejected: %s', exc)
-        raise HTTPException(status_code=400, detail=str(exc))
+        # The message is logged in full but not returned. Echoing an exception
+        # string to a caller leaks internal structure, and this endpoint is
+        # reachable by anything that can talk to the interface engine.
+        logger.error('[patient-context] Rejected: %s', scrub(exc))
+        raise HTTPException(status_code=400,
+                            detail='patient context rejected: missing or invalid MRN')
     except Exception as exc:
         logger.error('[patient-context] FAILED to store mrn=%s: %s',
-                     ctx.mrn, exc, exc_info=True)
+                     scrub(ctx.mrn), scrub(exc), exc_info=True)
         raise HTTPException(status_code=500, detail='could not store patient context')
     return {'status': 'stored', 'mrn': ctx.mrn}
 
@@ -277,6 +283,13 @@ def read_patient_context(mrn: str):
 
 
 # ── Interop: coded charge capture ────────────────────────────────────────────
+
+# Returned instead of the exception text. The reasons a charge is refused
+# (unmapped diagnosis, unconfigured CPT) are actionable to an operator reading
+# the log, not to an arbitrary caller.
+_CHARGE_REJECTED = ('charge rejected: the diagnosis could not be mapped to '
+                    'ICD-10-CM, or the CPT code is not configured')
+
 
 class ChargeRequest(BaseModel):
     cpt_code: str
@@ -300,12 +313,13 @@ def suggest_charge(session_id: str, req: ChargeRequest):
             payload['session'], req.icd10_codes, req.cpt_code, confirmed_by=None
         )
     except ValueError as exc:
-        logger.error('[charge.suggest] session=%s rejected: %s', session_id, exc)
-        raise HTTPException(status_code=400, detail=str(exc))
+        logger.error('[charge.suggest] session=%s rejected: %s',
+                     scrub(session_id), scrub(exc))
+        raise HTTPException(status_code=400, detail=_CHARGE_REJECTED)
 
     save_charge(session_id, req.cpt_code, req.icd10_codes, status='planned')
     logger.info('[charge.suggest] session=%s cpt=%s icd10=%s (NOT billable)',
-                session_id, req.cpt_code, req.icd10_codes)
+                scrub(session_id), scrub(req.cpt_code), scrub(req.icd10_codes))
     return {'status': 'planned', 'session_id': session_id,
             'bundle': bundle.model_dump(exclude_none=True)}
 
@@ -333,8 +347,9 @@ def confirm_charge(session_id: str, req: ChargeRequest):
             confirmed_by=req.confirmed_by
         )
     except ValueError as exc:
-        logger.error('[charge.confirm] session=%s rejected: %s', session_id, exc)
-        raise HTTPException(status_code=400, detail=str(exc))
+        logger.error('[charge.confirm] session=%s rejected: %s',
+                     scrub(session_id), scrub(exc))
+        raise HTTPException(status_code=400, detail=_CHARGE_REJECTED)
 
     bundle_json = bundle.model_dump_json(exclude_none=True)
     # Delivery is non-fatal for the same reason note emission is: the provider's
@@ -346,6 +361,7 @@ def confirm_charge(session_id: str, req: ChargeRequest):
                 destination=result.get('destination'))
 
     logger.info('[charge.confirm] session=%s cpt=%s by=%s delivery=%s',
-                session_id, req.cpt_code, req.confirmed_by, result.get('status'))
+                scrub(session_id), scrub(req.cpt_code), scrub(req.confirmed_by),
+                scrub(result.get('status')))
     return {'status': 'billable', 'session_id': session_id,
             'confirmed_by': req.confirmed_by, 'delivery': result}

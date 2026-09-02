@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import logging
 
+from .logsafe import scrub
+
 logger = logging.getLogger(__name__)
 
 # ── Code system URIs ─────────────────────────────────────────────────────────
@@ -106,7 +108,7 @@ def dual_coding(icd10_code: str) -> dict | None:
     if not entry:
         logger.warning(
             '[interop.charge_codes] No crosswalk entry for ICD-10 %s — refusing '
-            'to guess a SNOMED equivalent', icd10_code
+            'to guess a SNOMED equivalent', scrub(icd10_code)
         )
         return None
 
@@ -114,7 +116,7 @@ def dual_coding(icd10_code: str) -> dict | None:
         logger.warning(
             '[interop.charge_codes] ICD-10 %s / SNOMED %s is marked UNVERIFIED. '
             'Do not rely on this mapping outside local demonstration.',
-            icd10_code, entry['snomed']
+            scrub(icd10_code), scrub(entry['snomed'])
         )
 
     return {

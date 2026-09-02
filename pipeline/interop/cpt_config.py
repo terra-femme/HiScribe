@@ -29,6 +29,8 @@ import json
 import logging
 import os
 
+from .logsafe import scrub
+
 logger = logging.getLogger(__name__)
 
 _CONFIG_PATH = os.environ.get(
@@ -83,7 +85,7 @@ def lookup_cpt(code: str) -> dict | None:
     if not entry:
         logger.warning(
             '[interop.cpt_config] CPT %s not configured — refusing to emit a '
-            'charge for an unknown procedure code', code
+            'charge for an unknown procedure code', scrub(code)
         )
     return entry
 

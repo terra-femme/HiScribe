@@ -117,7 +117,8 @@ def test_no_cpt_codes_are_committed_to_the_repository():
     repo = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..'))
     committed = os.path.join(repo, 'config', 'cpt_codes.json')
     if os.path.exists(committed):
-        gitignore = open(os.path.join(repo, '.gitignore'), encoding='utf-8').read()
+        with open(os.path.join(repo, '.gitignore'), encoding='utf-8') as fh:
+            gitignore = fh.read()
         assert 'config/cpt_codes.json' in gitignore, (
             'config/cpt_codes.json exists but is not gitignored — CPT '
             'descriptors must never be committed'

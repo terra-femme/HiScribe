@@ -45,8 +45,6 @@ try:
 except ImportError as exc:
     sys.exit(f'missing dependency ({exc.name}): pip install requests defusedxml')
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 logging.basicConfig(level=logging.INFO, format='%(levelname)-5s %(message)s')
 logger = logging.getLogger('deploy_channels')
 
@@ -60,16 +58,22 @@ _HEADERS = {'X-Requested-With': 'deploy_channels'}
 
 
 class Mirth:
-    def __init__(self, url: str, user: str, password: str):
+    def __init__(self, url: str, user: str, password: str, verify: bool | str = True):
         self.url = url.rstrip('/')
         self.auth = (user, password)
+        # TLS verification is ON unless the caller explicitly opts out. Mirth
+        # generates a self-signed certificate on first boot, so a local
+        # development server needs --insecure or --ca-bundle; a real deployment
+        # must not. Defaulting to verify=False would silently disable TLS
+        # verification for every environment, including a production one.
+        self.verify = verify
 
     def _call(self, method: str, path: str, **kw) -> requests.Response:
         headers = dict(_HEADERS)
         headers.update(kw.pop('headers', {}))
         return requests.request(
             method, f'{self.url}{path}', auth=self.auth, headers=headers,
-            verify=False, timeout=60, **kw
+            verify=self.verify, timeout=60, **kw
         )
 
     def version(self) -> str:
@@ -153,13 +157,26 @@ def main() -> int:
     parser.add_argument('--url', default=DEFAULT_URL)
     parser.add_argument('--user', default=DEFAULT_USER)
     parser.add_argument('--password', default=DEFAULT_PASS)
+    parser.add_argument('--insecure', action='store_true',
+                        help="skip TLS verification — for Mirth's self-signed "
+                             'development certificate only, never a real server')
+    parser.add_argument('--ca-bundle', default=os.environ.get('MIRTH_CA_BUNDLE'),
+                        help='path to a CA bundle that signs the Mirth certificate')
     parser.add_argument('--undeploy', action='store_true',
                         help='undeploy the channels instead of deploying them')
     parser.add_argument('--timeout', type=int, default=60,
                         help='seconds to wait for channels to reach STARTED')
     args = parser.parse_args()
 
-    mirth = Mirth(args.url, args.user, args.password)
+    verify: bool | str = args.ca_bundle or True
+    if args.insecure:
+        verify = False
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        logger.warning(
+            '[deploy] TLS verification DISABLED (--insecure). Acceptable only '
+            'against a local development server using a self-signed cert.'
+        )
+    mirth = Mirth(args.url, args.user, args.password, verify=verify)
     try:
         logger.info('[deploy] Mirth Connect %s at %s', mirth.version(), args.url)
     except requests.RequestException as exc:
@@ -174,7 +191,8 @@ def main() -> int:
 
     channels: list[tuple[str, str, str]] = []
     for path in paths:
-        xml = open(path, encoding='utf-8').read()
+        with open(path, encoding='utf-8') as fh:
+            xml = fh.read()
         root = ET.fromstring(xml)
         cid, name = root.findtext('id'), root.findtext('name')
         if not cid or not name:

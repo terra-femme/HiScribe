@@ -25,3 +25,7 @@ from .mirth_http import send_bundle  # noqa: F401
 # Still open — POST to a HAPI FHIR test server so an external validator, rather
 # than our own models, is the correctness gate on the bundle:
 # from .hapi_server import send_bundle  # noqa: F401
+
+# Re-export, not an unused import: this module exists so callers import
+# `send_bundle` from a stable path while the implementation behind it swaps.
+__all__ = ['send_bundle']

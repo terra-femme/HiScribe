@@ -36,6 +36,8 @@ from . import charge_codes, codes
 from .builder import _iso_utc, _safe_id
 from .cpt_config import lookup_cpt
 
+from .logsafe import scrub
+
 logger = logging.getLogger(__name__)
 
 
@@ -64,7 +66,7 @@ def _build_conditions(session_id: str, pid: str, icd10_codes: list[str]) -> list
     if not conditions:
         logger.error(
             '[interop.charge] Session %s produced no codeable Condition from %s',
-            session_id, icd10_codes
+            scrub(session_id), scrub(icd10_codes)
         )
     return conditions
 
@@ -159,12 +161,13 @@ def build_charge_bundle(session: dict, icd10_codes: list[str], cpt_code: str,
     logger.info(
         '[interop.charge] Built charge bundle session=%s status=%s cpt=%s '
         'conditions=%d confirmed_by=%s',
-        session_id, status, procedure['code'], len(conditions), confirmed_by or 'NOT CONFIRMED'
+        scrub(session_id), status, scrub(procedure['code']), len(conditions),
+        scrub(confirmed_by or 'NOT CONFIRMED')
     )
     if status != charge_codes.CHARGE_STATUS_BILLABLE:
         logger.warning(
             '[interop.charge] Session %s charge is %s, not billable — it will be '
-            'skipped by Charge_Outbound', session_id, status
+            'skipped by Charge_Outbound', scrub(session_id), status
         )
 
     return Bundle(type='transaction', entry=entries)

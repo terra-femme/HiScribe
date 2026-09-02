@@ -143,12 +143,29 @@ function identifierValue(resource, systemMatch) {
  */
 function narrativeText(section) {
     if (!section || !section.text || !section.text.div) return '';
-    return String(section.text.div)
-        .replace(/&lt;[^&gt;]*&gt;/g, '')
+    var text = String(section.text.div);
+
+    // Strip tags to a FIXED POINT, not in a single pass. One pass of
+    // /&lt;[^&gt;]*&gt;/ is incomplete sanitisation: nested or malformed markup such as
+    // "&lt;&lt;b&gt;&gt;" leaves "&lt;&gt;" behind, and the leftover can reappear as content.
+    // The iteration bound stops a pathological input from spinning here.
+    var previous;
+    var passes = 0;
+    do {
+        previous = text;
+        text = text.replace(/&lt;[^&gt;]*&gt;/g, '');
+        passes++;
+    } while (text !== previous &amp;&amp; passes &lt; 10);
+
+    // Entities are decoded AFTER tag removal, so a decoded '&lt;' can never be
+    // re-interpreted as the start of a tag. &amp;amp; is decoded last for the same
+    // reason: doing it first would let "&amp;amp;lt;" become "&lt;".
+    text = text
         .replace(/&amp;lt;/g, '&lt;').replace(/&amp;gt;/g, '&gt;')
         .replace(/&amp;quot;/g, '"').replace(/&amp;#39;/g, "'")
-        .replace(/&amp;amp;/g, '&amp;')
-        .trim();
+        .replace(/&amp;amp;/g, '&amp;');
+
+    return text.trim();
 }
 
 /**

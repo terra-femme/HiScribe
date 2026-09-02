@@ -53,15 +53,36 @@ def build_adt(mrn: str, event: str, family: str, given: str, birth_date: str,
     # eleven empty fields past PV1-7, and getting that count right by eye is how
     # a value silently lands in the wrong field.
     pv1 = [''] * 20
-    pv1[0]  = 'PV1'
-    pv1[1]  = '1'                                    # PV1-1  Set ID
-    pv1[2]  = patient_class                          # PV1-2  Patient Class (0004)
-    pv1[3]  = f'CLINIC^^^{facility}'                 # PV1-3  Assigned Location
-    pv1[7]  = f'{npi}^SMITH^ALAN^^^^^^NPI'           # PV1-7  Attending Doctor
-    pv1[19] = f'V{random.randint(100000, 999999)}'   # PV1-19 Visit Number
+    pv1[0] = 'PV1'
+    pv1[1] = '1'                                    # PV1-1  Set ID
+    pv1[2] = patient_class                          # PV1-2  Patient Class (0004)
+    pv1[3] = f'CLINIC^^^{facility}'                 # PV1-3  Assigned Location
+    pv1[7] = f'{npi}^SMITH^ALAN^^^^^^NPI'           # PV1-7  Attending Doctor
+    pv1[19] = f'V{random.randint(100000, 999999)}'  # PV1-19 Visit Number
     segments.append('|'.join(pv1))
 
     return '\r'.join(segments) + '\r'
+
+
+def redact(message: str) -> str:
+    """Mask the demographic fields before a message is printed.
+
+    PID-5 (patient name) and PID-7 (date of birth) are the two fields here that
+    would be identifying if the data were real. This tool only ever generates
+    synthetic data, but printing PHI-shaped fields to a terminal or a CI log is
+    the habit that leaks real demographics the day someone points a copy of this
+    at a live feed.
+    """
+    out = []
+    for line in message.replace('\r', '\n').rstrip().split('\n'):
+        if line.startswith('PID|'):
+            fields = line.split('|')
+            for index in (5, 7):
+                if len(fields) > index and fields[index]:
+                    fields[index] = '<redacted>'
+            line = '|'.join(fields)
+        out.append(line)
+    return '\n'.join(out)
 
 
 def send_mllp(host: str, port: int, message: str, timeout: float = 15.0) -> str:
@@ -94,13 +115,18 @@ def main() -> int:
     parser.add_argument('--patient-class', default='O')
     parser.add_argument('--npi', default=DEFAULT_NPI)
     parser.add_argument('--facility', default='MEMORIAL_SIM')
+    parser.add_argument('--show-phi', action='store_true',
+                        help='print PID-5 (name) and PID-7 (birth date) unmasked; '
+                             'synthetic data only, never point this at a live feed')
     args = parser.parse_args()
 
     message = build_adt(args.mrn, args.event, args.family, args.given,
                         args.birth_date, args.sex, args.patient_class,
                         args.npi, args.facility)
+
+    # Masked by default; revealing demographics is an explicit, visible choice.
     print('--- sending ---')
-    print(message.replace('\r', '\n').rstrip())
+    print(message.replace('\r', '\n').rstrip() if args.show_phi else redact(message))
 
     try:
         ack = send_mllp(args.host, args.port, message)
@@ -113,7 +139,8 @@ def main() -> int:
 
     for line in ack.replace('\r\n', '\r').replace('\n', '\r').split('\r'):
         if line.startswith('MSA|'):
-            code = line.split('|')[1] if len(line.split('|')) > 1 else '?'
+            parts = line.split('|')
+            code = parts[1] if len(parts) > 1 else '?'
             if code != 'AA':
                 logger.error('[send_adt] Receiver returned MSA-1=%s', code)
                 return 1

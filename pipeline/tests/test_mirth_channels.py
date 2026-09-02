@@ -79,7 +79,8 @@ def test_message_storage_mode_is_set(path):
 @pytest.mark.parametrize('path', CHANNEL_FILES, ids=lambda p: os.path.basename(p))
 def test_no_invalid_field_names(path):
     """Guards the exact field names that silently invalidated a connector."""
-    xml = open(path, encoding='utf-8').read()
+    with open(path, encoding='utf-8') as fh:
+        xml = fh.read()
     # MLLPModeProperties' field is maxRetries.
     assert '<maxRetryCount>' not in xml
     # DestinationConnectorProperties' field is reattachAttachments.
@@ -96,7 +97,8 @@ def test_no_invalid_field_names(path):
 def test_hl7_datatypes_are_fully_populated(path):
     """HL7v2DataTypeProperties with a null serializationProperties imports and
     then fails to deploy."""
-    xml = open(path, encoding='utf-8').read()
+    with open(path, encoding='utf-8') as fh:
+        xml = fh.read()
     if 'HL7v2DataTypeProperties' in xml:
         assert 'HL7v2SerializationProperties' in xml
         assert 'HL7v2ResponseGenerationProperties' in xml
@@ -105,7 +107,8 @@ def test_hl7_datatypes_are_fully_populated(path):
 def test_mllp_framing_bytes_are_standard():
     """MLLP is <VT> message <FS><CR> — 0x0B ... 0x1C 0x0D."""
     for path in CHANNEL_FILES:
-        xml = open(path, encoding='utf-8').read()
+        with open(path, encoding='utf-8') as fh:
+            xml = fh.read()
         if 'MLLPModeProperties' in xml:
             assert '<startOfMessageBytes>0B</startOfMessageBytes>' in xml
             assert '<endOfMessageBytes>1C0D</endOfMessageBytes>' in xml
@@ -126,6 +129,7 @@ def test_transformers_are_inlined():
     for name, marker in (('Note_Outbound', 'MDM^T02'),
                          ('Charge_Outbound', 'DFT^P03'),
                          ('ADT_Inbound', 'patientContext')):
-        xml = open(os.path.join(CHANNEL_DIR, f'{name}.xml'), encoding='utf-8').read()
+        with open(os.path.join(CHANNEL_DIR, f'{name}.xml'), encoding='utf-8') as fh:
+            xml = fh.read()
         assert 'JavaScriptStep' in xml, f'{name} has no transformer step'
         assert marker in xml, f'{name} transformer does not mention {marker}'

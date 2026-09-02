@@ -23,6 +23,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'pipeline'))
 
+from interop.logsafe import scrub  # noqa: E402
+
 logging.basicConfig(level=logging.INFO, format='%(levelname)-5s %(message)s')
 logger = logging.getLogger('dev_context_listener')
 
@@ -35,12 +37,12 @@ class Handler(BaseHTTPRequestHandler):
 
         length = int(self.headers.get('Content-Length') or 0)
         body = self.rfile.read(length).decode('utf-8')
-        logger.info('[listener] POST %s (%d bytes)', self.path, length)
+        logger.info('[listener] POST %s (%d bytes)', scrub(self.path), length)
 
         try:
             context = json.loads(body)
         except json.JSONDecodeError as exc:
-            logger.error('[listener] Body is not JSON: %s', exc)
+            logger.error('[listener] Body is not JSON: %s', scrub(exc))
             self.send_error(400, 'invalid JSON')
             return
 
@@ -48,16 +50,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             save_patient_context(context)
         except ValueError as exc:
-            logger.error('[listener] Rejected: %s', exc)
+            logger.error('[listener] Rejected: %s', scrub(exc))
             self.send_error(400, str(exc))
             return
         except Exception as exc:
-            logger.error('[listener] Store FAILED: %s', exc, exc_info=True)
+            logger.error('[listener] Store FAILED: %s', scrub(exc), exc_info=True)
             self.send_error(500, 'could not store patient context')
             return
 
         logger.info('[listener] Stored mrn=%s event=%s',
-                    context.get('mrn'), context.get('triggerEvent'))
+                    scrub(context.get('mrn')), scrub(context.get('triggerEvent')))
         payload = json.dumps({'status': 'stored', 'mrn': context.get('mrn')}).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')

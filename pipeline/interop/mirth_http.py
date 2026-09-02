@@ -25,6 +25,8 @@ import os
 
 import httpx
 
+from .logsafe import scrub
+
 logger = logging.getLogger(__name__)
 
 # Inside docker-compose the Mirth service is reachable by service name. The
@@ -57,7 +59,7 @@ def _post(url: str, channel: str, session_id: str, bundle_json: str) -> dict:
     """
     logger.info(
         '[interop.mirth_http] %s POST session=%s bytes=%d -> %s',
-        channel, session_id, len(bundle_json), url
+        channel, scrub(session_id), len(bundle_json), scrub(url)
     )
     try:
         response = httpx.post(
@@ -77,7 +79,7 @@ def _post(url: str, channel: str, session_id: str, bundle_json: str) -> dict:
         logger.error(
             '[interop.mirth_http] Delivery FAILED session=%s -> %s: %s '
             '(approval stands; bundle is persisted and can be re-sent)',
-            session_id, url, exc, exc_info=True
+            scrub(session_id), scrub(url), scrub(exc), exc_info=True
         )
         return {'status': 'error', 'destination': url, 'detail': str(exc)}
 
@@ -85,7 +87,7 @@ def _post(url: str, channel: str, session_id: str, bundle_json: str) -> dict:
     if response.status_code >= 400:
         logger.error(
             '[interop.mirth_http] Mirth rejected bundle session=%s status=%d body=%s',
-            session_id, response.status_code, body[:500]
+            scrub(session_id), response.status_code, scrub(body)
         )
         return {
             'status': 'error',
@@ -101,7 +103,7 @@ def _post(url: str, channel: str, session_id: str, bundle_json: str) -> dict:
     if ack_code and ack_code != 'AA':
         logger.error(
             '[interop.mirth_http] Downstream NACK session=%s MSA-1=%s body=%s',
-            session_id, ack_code, body[:500]
+            scrub(session_id), scrub(ack_code), scrub(body)
         )
         return {
             'status': 'error',
@@ -111,7 +113,7 @@ def _post(url: str, channel: str, session_id: str, bundle_json: str) -> dict:
 
     logger.info(
         '[interop.mirth_http] Bundle accepted session=%s ack=%s',
-        session_id, ack_code or 'none'
+        scrub(session_id), scrub(ack_code or 'none')
     )
     return {'status': 'sent', 'destination': url, 'detail': ack_code}
 

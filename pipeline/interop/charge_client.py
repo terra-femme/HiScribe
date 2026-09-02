@@ -18,3 +18,7 @@ from .mirth_http import send_charge  # noqa: F401
 
 # Local disk, for development without a running Mirth:
 # from .local_file import send_bundle as send_charge  # noqa: F401
+
+# Re-export, not an unused import: this module exists so callers import
+# `send_charge` from a stable path while the implementation behind it swaps.
+__all__ = ['send_charge']

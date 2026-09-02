@@ -106,7 +106,11 @@ def approve(session_id: str, req: ApproveRequest):
             '[approve] FHIR generation FAILED session=%s: %s — approval stands, '
             'bundle can be re-emitted', scrub(session_id), scrub(exc), exc_info=True
         )
-        fhir = {'status': 'error', 'detail': str(exc)}
+        # The exception is logged above in full. The caller gets a stable
+        # marker: the approval succeeded, the bundle did not go out, and it can
+        # be re-emitted. Echoing exception text here would leak internals to
+        # whatever called the approve endpoint.
+        fhir = {'status': 'error', 'detail': 'FHIR generation failed; see server logs'}
 
     return {'status': 'approved', 'session_id': session_id, 'fhir': fhir}
 
@@ -363,5 +367,10 @@ def confirm_charge(session_id: str, req: ChargeRequest):
     logger.info('[charge.confirm] session=%s cpt=%s by=%s delivery=%s',
                 scrub(session_id), scrub(req.cpt_code), scrub(req.confirmed_by),
                 scrub(result.get('status')))
+    # `result` carries a `detail` field that can hold a transport error string
+    # from the sink. Report the outcome and destination; the detail stays in the
+    # log rather than travelling back to the caller.
     return {'status': 'billable', 'session_id': session_id,
-            'confirmed_by': req.confirmed_by, 'delivery': result}
+            'confirmed_by': req.confirmed_by,
+            'delivery': {'status': result.get('status'),
+                         'destination': result.get('destination')}}

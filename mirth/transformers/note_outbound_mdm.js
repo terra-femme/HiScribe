@@ -216,7 +216,7 @@ segments.push([
     // 'T' = training/test. This pipeline carries synthetic data only; claiming
     // 'P' (production) would misrepresent what the interface is doing.
     'T', '2.5'
-].join(FIELD).replace('MSH|^~\\&|', 'MSH|^~\\&|'));
+].join(FIELD));
 
 segments.push(['EVN', 'T02', when].join(FIELD));
 

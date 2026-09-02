@@ -48,9 +48,17 @@ jobs:
       # Blocking: anything this branch introduces must be clean.
       - name: New findings (blocking)
         if: github.event_name == 'pull_request'
+        # BASE_REF travels through the environment rather than being
+        # interpolated into the script body. A ${{ }} expression spliced
+        # directly into `run` is evaluated as shell text, so a crafted branch
+        # name becomes command injection with this job's token.
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          semgrep scan --config=p/default --config=p/secrets             --baseline-commit "$(git merge-base origin/${{ github.base_ref }} HEAD)"             --error --skip-unknown-extensions .
+          BASELINE="$(git merge-base "origin/$BASE_REF" HEAD)"
+          semgrep scan --config=p/default --config=p/secrets \
+            --baseline-commit "$BASELINE" --error --skip-unknown-extensions .
 
       # Informational: the whole tree, including pre-existing findings in
       # client/ and gateway/ that predate this workflow. Visible, not blocking,

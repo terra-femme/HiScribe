@@ -96,7 +96,15 @@ def approve(session_id: str, req: ApproveRequest):
                 destination=result.get('destination'),
                 status=result.get('status', 'generated'),
             )
-            fhir = {'status': result.get('status'), 'detail': result.get('detail')}
+            # On success the sink's detail is the downstream ACK code, which is
+            # safe and useful to return. On failure it can hold a transport
+            # exception string, so that path reports only that delivery failed
+            # — the detail is already in the log above.
+            delivered = result.get('status') in ('sent', 'written')
+            fhir = {
+                'status': result.get('status'),
+                'detail': result.get('detail') if delivered else 'delivery failed; see server logs',
+            }
             logger.info(
                 '[approve] FHIR bundle emitted session=%s status=%s dest=%s',
                 scrub(session_id), scrub(fhir['status']), scrub(result.get('destination'))

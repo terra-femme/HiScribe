@@ -1,0 +1,27 @@
+"""Charge sink adapter — re-export only.
+
+Same convention as `client.py`: the destination for a confirmed charge is
+swapped by changing one commented import, and no calling code moves.
+
+Sink contract — any implementation must expose:
+
+    send_charge(session_id: str, bundle_json: str) -> dict
+        {'status': 'sent'|'written'|'error', 'destination': str,
+         'detail': str | None}
+        Must not raise. A billing system being unreachable is an operational
+        problem, not a reason to discard a provider's confirmation.
+
+        `detail` carries the downstream ACK code on success and a short,
+        non-sensitive category on failure — never raw exception text.
+
+Active sink:
+"""
+
+from .mirth_http import send_charge  # noqa: F401
+
+# Local disk, for development without a running Mirth:
+# from .local_file import send_bundle as send_charge  # noqa: F401
+
+# Re-export, not an unused import: this module exists so callers import
+# `send_charge` from a stable path while the implementation behind it swaps.
+__all__ = ['send_charge']

@@ -1,0 +1,11 @@
+{
+  "_comment": [
+    "Copy this file to config/cpt_codes.json and fill in the descriptors from",
+    "your own AMA-licensed CPT source. cpt_codes.json is gitignored.",
+    "CPT is copyrighted by the American Medical Association. Its descriptors",
+    "may not be redistributed, so no real descriptor appears in this repository."
+  ],
+  "99213": { "display": "<office/outpatient established patient, low MDM>" },
+  "99214": { "display": "<office/outpatient established patient, moderate MDM>" },
+  "99203": { "display": "<office/outpatient new patient, low MDM>" }
+}

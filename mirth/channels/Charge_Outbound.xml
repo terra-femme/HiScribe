@@ -1,0 +1,581 @@
+<channel version="4.4.2">
+  <id>a1000000-0000-4000-8000-000000000005</id>
+  <nextMetaDataId>2</nextMetaDataId>
+  <name>Charge_Outbound</name>
+  <description>Clinical documentation to revenue cycle. Receives a FHIR Bundle carrying provider-confirmed ChargeItem and dual-coded Condition resources over HTTP on 8082/charge, maps them to an HL7 v2.5 DFT^P03 with FT1 and DG1 segments, and posts to PM_Mock over MLLP.
+
+ICD-10-CM is selected for FT1-19 and DG1 deliberately: SNOMED CT carries the clinical meaning, ICD-10-CM is what a payer adjudicates.
+
+Mapping logic: mirth/transformers/charge_outbound_dft.js
+
+This is a SIMULATED system for development and portfolio use. It is not Epic, Cerner, or any commercial product, and all data flowing through it is synthetic. Nothing here should be described as experience with a vendor EHR or with real patient data.</description>
+  <revision>1</revision>
+  <sourceConnector version="4.4.2">
+    <metaDataId>0</metaDataId>
+    <name>sourceConnector</name>
+    <properties class="com.mirth.connect.connectors.http.HttpReceiverProperties" version="4.4.2">
+      <pluginProperties/>
+      <listenerConnectorProperties version="4.4.2">
+        <host>0.0.0.0</host>
+        <port>8082</port>
+      </listenerConnectorProperties>
+      <sourceConnectorProperties version="4.4.2">
+        <responseVariable>Postprocessor</responseVariable>
+        <respondAfterProcessing>true</respondAfterProcessing>
+        <processBatch>false</processBatch>
+        <firstResponse>false</firstResponse>
+        <processingThreads>1</processingThreads>
+        <queueBufferSize>1000</queueBufferSize>
+        <resourceIds class="linked-hash-map"><entry><string>Default Resource</string><string>[Default Resource]</string></entry></resourceIds>
+      </sourceConnectorProperties>
+      <xmlBody>false</xmlBody>
+      <parseMultipart>false</parseMultipart>
+      <includeMetadata>false</includeMetadata>
+      <binaryMimeTypes>application/.*(?&lt;!json|xml)$|image/.*|video/.*|audio/.*</binaryMimeTypes>
+      <binaryMimeTypesRegex>true</binaryMimeTypesRegex>
+      <responseContentType>text/plain</responseContentType>
+      <responseDataTypeBinary>false</responseDataTypeBinary>
+      <responseStatusCode></responseStatusCode>
+      <responseHeaders class="linked-hash-map"/>
+      <responseHeadersVariable></responseHeadersVariable>
+      <!-- The receiver's flag is useResponseHeadersVariable. The dispatcher's
+           equivalent is useHeadersVariable; they are not interchangeable. -->
+      <useResponseHeadersVariable>false</useResponseHeadersVariable>
+      <charset>UTF-8</charset>
+      <contextPath>/charge</contextPath>
+      <timeout>30000</timeout>
+      <staticResources/>
+    </properties>
+    <transformer version="4.4.2">
+        <elements>
+          <com.mirth.connect.plugins.javascriptstep.JavaScriptStep version="4.4.2">
+            <name>FHIR ChargeItem to DFT^P03</name>
+            <sequenceNumber>0</sequenceNumber>
+            <enabled>true</enabled>
+            <script>/**
+ * Charge_Outbound source transformer — FHIR ChargeItem -&gt; HL7 v2.5 DFT^P03.
+ *
+ * The clinical-documentation to revenue-cycle handoff. Once a provider has
+ * confirmed the charge, this posts it to the practice-management/billing system
+ * as a Detail Financial Transaction.
+ *
+ * Structure, HL7 v2.5 Chapter 6:
+ *   MSH, [SFT], EVN, PID, [PD1], [ROL], [PV1], [PV2], [common order],
+ *   {FT1 ...}, [DG1 ...], [DRG], [GT1], [insurance], [ACC]
+ *
+ * FT1 fields used, verified against the v2.5 standard:
+ *   FT1-1  Set ID
+ *   FT1-2  Transaction ID          idempotency key, see below
+ *   FT1-4  Transaction Date        DR
+ *   FT1-6  Transaction Type        table 0017 -&gt; CG (Charge)
+ *   FT1-7  Transaction Code        CE, the billed procedure
+ *   FT1-10 Transaction Quantity    NM
+ *   FT1-11 Transaction Amount      CP, extended
+ *   FT1-19 Diagnosis Code          CE, "primary diagnosis code for billing"
+ *   FT1-20 Performed By Code       XCN
+ *   FT1-25 Procedure Code          CE
+ *
+ * Why ICD-10 and not SNOMED in FT1-19 and DG1
+ * -------------------------------------------
+ * HiScribe emits Condition.code carrying BOTH a SNOMED CT coding (the clinical
+ * meaning) and an ICD-10-CM coding (what the payer adjudicates). They are not
+ * interchangeable: SNOMED expresses what the clinician meant, ICD-10-CM is what
+ * goes on the claim. A DFT that put SNOMED in FT1-19 would be well-formed and
+ * would still be rejected by every payer. This transformer selects the ICD-10
+ * coding explicitly and logs when one is missing rather than silently falling
+ * back to whichever coding happens to be first.
+ *
+ * Idempotency
+ * -----------
+ * FT1-2 is set from the ChargeItem id, which is derived from the session. A
+ * charge replayed after a network retry therefore arrives with the same
+ * transaction id, which is what lets a billing system reject the duplicate
+ * instead of double-billing a patient. This is the single most consequential
+ * field in the message.
+ */
+
+var FIELD = '|', COMP = '^';
+
+var ICD10_SYSTEMS  = ['icd-10', 'icd10', 'sid/icd-10'];
+var SNOMED_SYSTEMS = ['snomed'];
+
+function esc(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/\\/g, '\\E\\')
+        .replace(/\|/g, '\\F\\')
+        .replace(/\^/g, '\\S\\')
+        .replace(/~/g,  '\\R\\')
+        .replace(/&amp;/g,  '\\T\\')
+        .replace(/\r\n|\r|\n/g, '\\.br\\');
+}
+
+function ts(iso) {
+    var d = iso ? new Date(iso) : new Date();
+    if (isNaN(d.getTime())) d = new Date();
+    function p(n) { return (n &lt; 10 ? '0' : '') + n; }
+    return d.getUTCFullYear() + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) +
+           p(d.getUTCHours()) + p(d.getUTCMinutes()) + p(d.getUTCSeconds());
+}
+
+function collect(bundle, type) {
+    var out = [], entries = (bundle &amp;&amp; bundle.entry) || [];
+    for (var i = 0; i &lt; entries.length; i++) {
+        var r = entries[i].resource;
+        if (r &amp;&amp; r.resourceType === type) out.push(r);
+    }
+    return out;
+}
+
+function identifierValue(resource, systemMatch) {
+    if (!resource || !resource.identifier) return '';
+    for (var i = 0; i &lt; resource.identifier.length; i++) {
+        var id = resource.identifier[i];
+        if (!systemMatch || (id.system &amp;&amp; id.system.indexOf(systemMatch) !== -1)) {
+            return id.value || '';
+        }
+    }
+    return resource.identifier[0].value || '';
+}
+
+/** Pick the coding whose system matches one of `wanted`. Returns null if absent. */
+function codingBySystem(codeableConcept, wanted) {
+    if (!codeableConcept || !codeableConcept.coding) return null;
+    for (var i = 0; i &lt; codeableConcept.coding.length; i++) {
+        var c = codeableConcept.coding[i];
+        var sys = (c.system || '').toLowerCase();
+        for (var w = 0; w &lt; wanted.length; w++) {
+            if (sys.indexOf(wanted[w]) !== -1) return c;
+        }
+    }
+    return null;
+}
+
+/** CE data type: identifier ^ text ^ coding system. */
+function ce(coding, nameOfSystem) {
+    if (!coding) return '';
+    return esc(coding.code) + COMP + esc(coding.display || '') +
+           COMP + (nameOfSystem || '');
+}
+
+/**
+ * Read an inbound HTTP header.
+ *
+ * Mirth does not put headers directly on the source map — they live in a nested
+ * 'headers' map, and a repeated header arrives as a List rather than a String.
+ * HTTP header names are case-insensitive per RFC 7230, so an exact lookup alone
+ * is not safe.
+ */
+function httpHeader(name) {
+    try {
+        var headers = sourceMap.get('headers');
+        if (headers) {
+            var value = headers.get(name);
+            if (value === null || value === undefined) {
+                var keys = headers.keySet().toArray();
+                for (var k = 0; k &lt; keys.length; k++) {
+                    if (String(keys[k]).toLowerCase() === name.toLowerCase()) {
+                        value = headers.get(keys[k]);
+                        break;
+                    }
+                }
+            }
+            if (value !== null &amp;&amp; value !== undefined) {
+                // A repeated header is a List; take the first value.
+                if (typeof value.get === 'function' &amp;&amp; typeof value.size === 'function') {
+                    return value.size() &gt; 0 ? String(value.get(0)) : '';
+                }
+                return String(value);
+            }
+        }
+    } catch (e) {
+        logger.warn('[Charge_Outbound] Could not read header ' + name + ': ' + e);
+    }
+    var direct = sourceMap.get(name);
+    return (direct === null || direct === undefined) ? '' : String(direct);
+}
+
+/**
+ * XCN — extended composite ID number and name (HL7 v2.5 §2.A.89).
+ * Component 9 is Assigning Authority; component 13 is Identifier Type Code.
+ * Building by index avoids the caret-counting error that put 'NPI' in the
+ * assigning-authority slot in an earlier version of this file.
+ */
+function xcn(id, family, given, identifierType) {
+    var c = [];
+    c[0]  = id || '';
+    c[1]  = family || '';
+    c[2]  = given || '';
+    c[12] = identifierType || '';
+    return c.join(COMP);            // holes join as empty components
+}
+
+// ---------------------------------------------------------------------------
+
+var SENDING_APP   = globalMap.get('HISCRIBE_APP')      || 'HISCRIBE';
+var SENDING_FAC   = globalMap.get('HISCRIBE_FACILITY') || 'HISCRIBE_DEV';
+var RECEIVING_APP = globalMap.get('PM_APP')            || 'PM_MOCK';
+var RECEIVING_FAC = globalMap.get('PM_FACILITY')       || 'MEMORIAL_SIM';
+
+var raw = connectorMessage.getRawData();
+var bundle;
+try {
+    bundle = JSON.parse(raw);
+} catch (e) {
+    logger.error('[Charge_Outbound] Body is not JSON: ' + e);
+    throw new Error('Charge_Outbound expected a FHIR Bundle as JSON: ' + e);
+}
+
+var chargeItems  = collect(bundle, 'ChargeItem');
+var conditions   = collect(bundle, 'Condition');
+var patient      = collect(bundle, 'Patient')[0] || null;
+var practitioner = collect(bundle, 'Practitioner')[0] || null;
+
+if (!chargeItems.length) {
+    logger.error('[Charge_Outbound] Bundle contains no ChargeItem');
+    throw new Error('Bundle contains no ChargeItem resource');
+}
+
+var sessionId = httpHeader('X-HiScribe-Session') || 'UNKNOWN';
+var mrn = identifierValue(patient, 'mrn');
+var npi = identifierValue(practitioner, 'us-npi');
+var when = ts(chargeItems[0].occurrenceDateTime);
+
+// Resolve the primary billing diagnosis once; every FT1 references it.
+var primaryIcd10 = null;
+for (var c = 0; c &lt; conditions.length; c++) {
+    var icd = codingBySystem(conditions[c].code, ICD10_SYSTEMS);
+    if (icd) { primaryIcd10 = icd; break; }
+}
+if (!primaryIcd10 &amp;&amp; conditions.length) {
+    var snomedOnly = codingBySystem(conditions[0].code, SNOMED_SYSTEMS);
+    logger.warn('[Charge_Outbound] Condition has ' +
+                (snomedOnly ? 'only a SNOMED coding (' + snomedOnly.code + ')' : 'no usable coding') +
+                ' — FT1-19 will be empty. A claim needs ICD-10-CM.');
+}
+
+var segments = [];
+
+segments.push([
+    'MSH', '^~\\&amp;', SENDING_APP, SENDING_FAC, RECEIVING_APP, RECEIVING_FAC,
+    when, '', 'DFT^P03^DFT_P03', esc(sessionId), 'T', '2.5'
+].join(FIELD));
+
+segments.push(['EVN', 'P03', when].join(FIELD));
+
+segments.push([
+    'PID', '1', '', esc(mrn) + '^^^' + SENDING_FAC + '^MR', '', '', '', '', ''
+].join(FIELD));
+
+segments.push([
+    'PV1', '1', 'O', '', '', '', '', xcn(esc(npi), '', '', 'NPI')
+].join(FIELD));
+
+var ft1Count = 0;
+for (var i = 0; i &lt; chargeItems.length; i++) {
+    var item = chargeItems[i];
+
+    // Only provider-confirmed charges may be billed. HiScribe gates E/M level
+    // selection behind explicit provider confirmation because it is a billing
+    // determination with legal and financial consequence; an unconfirmed
+    // ChargeItem reaching this point is a bug upstream, not something to
+    // quietly bill.
+    if (item.status !== 'billable') {
+        logger.warn('[Charge_Outbound] Skipping ChargeItem ' + item.id +
+                    ' with status "' + item.status + '" — only "billable" is posted');
+        continue;
+    }
+
+    var procedure = codingBySystem(item.code, ['cpt', 'hcpcs']) ||
+                    ((item.code &amp;&amp; item.code.coding &amp;&amp; item.code.coding[0]) || null);
+    if (!procedure) {
+        logger.error('[Charge_Outbound] ChargeItem ' + item.id + ' has no procedure code');
+        continue;
+    }
+
+    ft1Count++;
+    var quantity = (item.quantity &amp;&amp; item.quantity.value) || 1;
+
+    var ft1 = [];
+    ft1[0]  = 'FT1';
+    ft1[1]  = String(ft1Count);                       // FT1-1  Set ID
+    ft1[2]  = esc(item.id || (sessionId + '-' + ft1Count));  // FT1-2  Transaction ID
+    ft1[3]  = '';
+    ft1[4]  = when;                                   // FT1-4  Transaction Date
+    ft1[5]  = when;                                   // FT1-5  Posting Date
+    ft1[6]  = 'CG';                                   // FT1-6  Type (0017) Charge
+    ft1[7]  = ce(procedure, 'C4');                    // FT1-7  Transaction Code
+    ft1[8]  = esc(procedure.display || '');           // FT1-8  Description
+    ft1[9]  = '';
+    ft1[10] = String(quantity);                       // FT1-10 Quantity
+    ft1[11] = '';                                     // FT1-11 Amount — priced by the PM system
+    ft1[12] = '';
+    ft1[13] = '';
+    ft1[14] = '';
+    ft1[15] = '';
+    ft1[16] = '';
+    ft1[17] = '';
+    ft1[18] = '';
+    ft1[19] = ce(primaryIcd10, 'I10');                // FT1-19 Diagnosis (ICD-10-CM)
+    ft1[20] = xcn(esc(npi), '', '', 'NPI');               // FT1-20 Performed By
+    ft1[21] = '';
+    ft1[22] = '';
+    ft1[23] = '';
+    ft1[24] = '';
+    ft1[25] = ce(procedure, 'C4');                    // FT1-25 Procedure Code
+    segments.push(ft1.join(FIELD));
+}
+
+if (ft1Count === 0) {
+    logger.error('[Charge_Outbound] No billable ChargeItem in bundle for session ' + sessionId);
+    throw new Error('no billable charges to post');
+}
+
+// DG1 repetitions carry the diagnosis list. ICD-10-CM again, for the same
+// reason as FT1-19 — this is the claim, not the chart.
+var dg1Count = 0;
+for (var d = 0; d &lt; conditions.length; d++) {
+    var coding = codingBySystem(conditions[d].code, ICD10_SYSTEMS);
+    if (!coding) continue;
+    dg1Count++;
+    segments.push([
+        'DG1', String(dg1Count), 'I10', ce(coding, 'I10'),
+        esc(coding.display || ''), when,
+        // DG1-6 Diagnosis Type, table 0052: A = admitting, W = working, F = final.
+        // Every diagnosis on a posted charge is final; 'A' does not mean
+        // "secondary" and would misdescribe a confirmed diagnosis as provisional.
+        // Ordering (DG1-1) is what distinguishes primary from secondary.
+        'F'
+    ].join(FIELD));
+}
+
+var hl7 = segments.join('\r') + '\r';
+
+logger.info('[Charge_Outbound] session=' + sessionId + ' ft1=' + ft1Count +
+            ' dg1=' + dg1Count + ' icd10=' + (primaryIcd10 ? primaryIcd10.code : 'MISSING') +
+            ' bytes=' + hl7.length);
+
+channelMap.put('hl7Message', hl7);
+channelMap.put('sessionId', sessionId);
+return;
+</script>
+          </com.mirth.connect.plugins.javascriptstep.JavaScriptStep>
+        </elements>
+        <inboundDataType>RAW</inboundDataType>
+        <outboundDataType>RAW</outboundDataType>
+        <inboundProperties class="com.mirth.connect.plugins.datatypes.raw.RawDataTypeProperties" version="4.4.2">
+          <batchProperties class="com.mirth.connect.plugins.datatypes.raw.RawBatchProperties" version="4.4.2">
+            <splitType>JavaScript</splitType>
+            <batchScript></batchScript>
+          </batchProperties>
+        </inboundProperties>
+        <outboundProperties class="com.mirth.connect.plugins.datatypes.raw.RawDataTypeProperties" version="4.4.2">
+          <batchProperties class="com.mirth.connect.plugins.datatypes.raw.RawBatchProperties" version="4.4.2">
+            <splitType>JavaScript</splitType>
+            <batchScript></batchScript>
+          </batchProperties>
+        </outboundProperties>
+      </transformer>
+    <filter version="4.4.2">
+      <elements/>
+    </filter>
+    <transportName>HTTP Listener</transportName>
+    <mode>SOURCE</mode>
+    <enabled>true</enabled>
+    <waitForPrevious>true</waitForPrevious>
+  </sourceConnector>
+  <destinationConnectors>
+    <connector version="4.4.2">
+      <metaDataId>1</metaDataId>
+      <name>Send to PM</name>
+      <properties class="com.mirth.connect.connectors.tcp.TcpDispatcherProperties" version="4.4.2">
+        <pluginProperties/>
+        <destinationConnectorProperties version="4.4.2">
+          <queueEnabled>false</queueEnabled>
+          <sendFirst>false</sendFirst>
+          <retryIntervalMillis>10000</retryIntervalMillis>
+          <regenerateTemplate>false</regenerateTemplate>
+          <retryCount>0</retryCount>
+          <rotate>false</rotate>
+          <includeFilterTransformer>false</includeFilterTransformer>
+          <threadCount>1</threadCount>
+          <threadAssignmentVariable></threadAssignmentVariable>
+          <validateResponse>false</validateResponse>
+          <resourceIds class="linked-hash-map"><entry><string>Default Resource</string><string>[Default Resource]</string></entry></resourceIds>
+          <queueBufferSize>1000</queueBufferSize>
+          <reattachAttachments>true</reattachAttachments>
+        </destinationConnectorProperties>
+        <transmissionModeProperties class="com.mirth.connect.plugins.mllpmode.MLLPModeProperties">
+        <pluginPointName>MLLP</pluginPointName>
+        <startOfMessageBytes>0B</startOfMessageBytes>
+        <endOfMessageBytes>1C0D</endOfMessageBytes>
+        <useMLLPv2>false</useMLLPv2>
+        <ackBytes>06</ackBytes>
+        <nackBytes>15</nackBytes>
+        <maxRetries>2</maxRetries>
+      </transmissionModeProperties>
+        <remoteAddress>localhost</remoteAddress>
+        <remotePort>6663</remotePort>
+        <overrideLocalBinding>false</overrideLocalBinding>
+        <localAddress>0.0.0.0</localAddress>
+        <localPort>0</localPort>
+        <sendTimeout>5000</sendTimeout>
+        <bufferSize>65536</bufferSize>
+        <maxConnections>10</maxConnections>
+        <keepConnectionOpen>false</keepConnectionOpen>
+        <checkRemoteHost>false</checkRemoteHost>
+        <responseTimeout>30000</responseTimeout>
+        <ignoreResponse>false</ignoreResponse>
+        <queueOnResponseTimeout>true</queueOnResponseTimeout>
+        <dataTypeBinary>false</dataTypeBinary>
+        <charsetEncoding>UTF-8</charsetEncoding>
+        <template>${hl7Message}</template>
+        <serverMode>false</serverMode>
+      </properties>
+      <transformer version="4.4.2">
+        <elements/>
+        <inboundDataType>RAW</inboundDataType>
+        <outboundDataType>RAW</outboundDataType>
+        <inboundProperties class="com.mirth.connect.plugins.datatypes.raw.RawDataTypeProperties" version="4.4.2">
+          <batchProperties class="com.mirth.connect.plugins.datatypes.raw.RawBatchProperties" version="4.4.2">
+            <splitType>JavaScript</splitType>
+            <batchScript></batchScript>
+          </batchProperties>
+        </inboundProperties>
+        <outboundProperties class="com.mirth.connect.plugins.datatypes.raw.RawDataTypeProperties" version="4.4.2">
+          <batchProperties class="com.mirth.connect.plugins.datatypes.raw.RawBatchProperties" version="4.4.2">
+            <splitType>JavaScript</splitType>
+            <batchScript></batchScript>
+          </batchProperties>
+        </outboundProperties>
+      </transformer>
+      <responseTransformer version="4.4.2">
+        <elements/>
+        <inboundDataType>HL7V2</inboundDataType>
+        <outboundDataType>HL7V2</outboundDataType>
+        <inboundProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2DataTypeProperties" version="4.4.2">
+          <serializationProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2SerializationProperties" version="4.4.2">
+            <handleRepetitions>true</handleRepetitions>
+            <handleSubcomponents>true</handleSubcomponents>
+            <useStrictParser>false</useStrictParser>
+            <useStrictValidation>false</useStrictValidation>
+            <stripNamespaces>false</stripNamespaces>
+            <segmentDelimiter>\r</segmentDelimiter>
+            <convertLineBreaks>true</convertLineBreaks>
+          </serializationProperties>
+          <deserializationProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2DeserializationProperties" version="4.4.2">
+            <useStrictParser>false</useStrictParser>
+            <useStrictValidation>false</useStrictValidation>
+            <segmentDelimiter>\r</segmentDelimiter>
+          </deserializationProperties>
+          <batchProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2BatchProperties" version="4.4.2">
+            <splitType>MSH_Segment</splitType>
+            <batchScript></batchScript>
+          </batchProperties>
+          <responseGenerationProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2ResponseGenerationProperties" version="4.4.2">
+            <segmentDelimiter>\r</segmentDelimiter>
+            <successfulACKCode>AA</successfulACKCode>
+            <successfulACKMessage></successfulACKMessage>
+            <errorACKCode>AE</errorACKCode>
+            <errorACKMessage>An error occurred processing the message.</errorACKMessage>
+            <rejectedACKCode>AR</rejectedACKCode>
+            <rejectedACKMessage>Message rejected.</rejectedACKMessage>
+            <dateFormat>yyyyMMddHHmmss.SSS</dateFormat>
+          </responseGenerationProperties>
+          <responseValidationProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2ResponseValidationProperties" version="4.4.2">
+            <successfulACKCode>AA,CA</successfulACKCode>
+            <errorACKCode>AE,CE</errorACKCode>
+            <rejectedACKCode>AR,CR</rejectedACKCode>
+            <validateMessageControlId>true</validateMessageControlId>
+            <originalMessageControlId>Destination_Encoded</originalMessageControlId>
+            <originalIdMapVariable></originalIdMapVariable>
+          </responseValidationProperties>
+        </inboundProperties>
+        <outboundProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2DataTypeProperties" version="4.4.2">
+          <serializationProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2SerializationProperties" version="4.4.2">
+            <handleRepetitions>true</handleRepetitions>
+            <handleSubcomponents>true</handleSubcomponents>
+            <useStrictParser>false</useStrictParser>
+            <useStrictValidation>false</useStrictValidation>
+            <stripNamespaces>false</stripNamespaces>
+            <segmentDelimiter>\r</segmentDelimiter>
+            <convertLineBreaks>true</convertLineBreaks>
+          </serializationProperties>
+          <deserializationProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2DeserializationProperties" version="4.4.2">
+            <useStrictParser>false</useStrictParser>
+            <useStrictValidation>false</useStrictValidation>
+            <segmentDelimiter>\r</segmentDelimiter>
+          </deserializationProperties>
+          <batchProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2BatchProperties" version="4.4.2">
+            <splitType>MSH_Segment</splitType>
+            <batchScript></batchScript>
+          </batchProperties>
+          <responseGenerationProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2ResponseGenerationProperties" version="4.4.2">
+            <segmentDelimiter>\r</segmentDelimiter>
+            <successfulACKCode>AA</successfulACKCode>
+            <successfulACKMessage></successfulACKMessage>
+            <errorACKCode>AE</errorACKCode>
+            <errorACKMessage>An error occurred processing the message.</errorACKMessage>
+            <rejectedACKCode>AR</rejectedACKCode>
+            <rejectedACKMessage>Message rejected.</rejectedACKMessage>
+            <dateFormat>yyyyMMddHHmmss.SSS</dateFormat>
+          </responseGenerationProperties>
+          <responseValidationProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2ResponseValidationProperties" version="4.4.2">
+            <successfulACKCode>AA,CA</successfulACKCode>
+            <errorACKCode>AE,CE</errorACKCode>
+            <rejectedACKCode>AR,CR</rejectedACKCode>
+            <validateMessageControlId>true</validateMessageControlId>
+            <originalMessageControlId>Destination_Encoded</originalMessageControlId>
+            <originalIdMapVariable></originalIdMapVariable>
+          </responseValidationProperties>
+        </outboundProperties>
+      </responseTransformer>
+      <filter version="4.4.2">
+        <elements/>
+      </filter>
+      <transportName>TCP Sender</transportName>
+      <mode>DESTINATION</mode>
+      <enabled>true</enabled>
+      <waitForPrevious>true</waitForPrevious>
+    </connector>
+  </destinationConnectors>
+  <preprocessingScript>return message;</preprocessingScript>
+  <postprocessingScript>/**
+ * Return the downstream ACK to the caller so delivery can be verified.
+ * See ack_postprocessor() in mirth/tools/build_channels.py.
+ */
+var response = responseMap.get('Send to PM');
+if (response) {
+    return response.getMessage();
+}
+logger.warn('[Charge_Outbound] Destination produced no response — caller cannot verify delivery');
+return '';</postprocessingScript>
+  <deployScript>return;</deployScript>
+  <undeployScript>return;</undeployScript>
+  <properties version="4.4.2">
+    <clearGlobalChannelMap>true</clearGlobalChannelMap>
+    <messageStorageMode>DEVELOPMENT</messageStorageMode>
+    <encryptData>false</encryptData>
+    <encryptAttachments>false</encryptAttachments>
+    <encryptCustomMetaData>false</encryptCustomMetaData>
+    <removeContentOnCompletion>false</removeContentOnCompletion>
+    <removeOnlyFilteredOnCompletion>false</removeOnlyFilteredOnCompletion>
+    <removeAttachmentsOnCompletion>false</removeAttachmentsOnCompletion>
+    <initialState>STARTED</initialState>
+    <storeAttachments>true</storeAttachments>
+    <metaDataColumns/>
+    <attachmentProperties version="4.4.2">
+      <type>None</type>
+      <properties/>
+    </attachmentProperties>
+    <resourceIds class="linked-hash-map"><entry><string>Default Resource</string><string>[Default Resource]</string></entry></resourceIds>
+  </properties>
+  <exportData>
+    <metadata>
+      <enabled>true</enabled>
+    </metadata>
+    <dependentIds/>
+    <dependencyIds/>
+    <channelTags/>
+  </exportData>
+</channel>

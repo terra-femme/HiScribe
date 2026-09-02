@@ -299,8 +299,9 @@ def read_patient_context(mrn: str):
 # Returned instead of the exception text. The reasons a charge is refused
 # (unmapped diagnosis, unconfigured CPT) are actionable to an operator reading
 # the log, not to an arbitrary caller.
-_CHARGE_REJECTED = ('charge rejected: the diagnosis could not be mapped to '
-                    'ICD-10-CM, or the CPT code is not configured')
+_CHARGE_REJECTED = ('charge rejected: the session is not approved, the diagnosis '
+                    'could not be mapped to ICD-10-CM, or the CPT code is not '
+                    'configured')
 
 
 class ChargeRequest(BaseModel):

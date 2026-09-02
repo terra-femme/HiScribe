@@ -107,7 +107,10 @@ Anything other than `STARTED` is a real failure — see *Troubleshooting*.
 python mirth/tools/send_adt.py --mrn MRN990011 --family ALVAREZ --given MARIA
 ```
 
-You should get `MSA|AA|<control id>` back. The printed message masks PID-5
+You should get `MSA|AA|<control id>` back. Send `--event A03` and the message
+is **FILTERED** — still acknowledged, counted as filtered in channel statistics,
+never dispatched. That is the correct outcome for an event the scribe does not
+handle. The printed message masks PID-5
 (name) and PID-7 (birth date); pass `--show-phi` to see them. The data is
 synthetic either way — the default exists so that printing PHI-shaped fields
 never becomes the habit. To see it land in the database, run
@@ -116,6 +119,13 @@ the development listener in another terminal first:
 ```powershell
 python mirth/tools/dev_context_listener.py --db data/hiscribe_dev.db --host 0.0.0.0
 ```
+
+`ADT_Inbound` posts to `http://host.docker.internal:8000`, which is how a
+container reaches the host on Docker Desktop (Windows/macOS). On a Linux host
+that name does not resolve by default: either run Mirth with
+`--add-host=host.docker.internal:host-gateway`, or change the URL in
+`build_channels.py` to `http://pipeline:8000` when everything runs inside the
+compose network.
 
 (The real endpoint is `POST /fhir/patient-context` in `pipeline/server.py`.
 `dev_context_listener.py` calls the same `save_patient_context()` without

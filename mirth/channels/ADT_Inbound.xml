@@ -87,15 +87,14 @@ function get(path) {
 var triggerEvent = get(function () { return msg['MSH']['MSH.9']['MSH.9.2']; });
 var controlId    = get(function () { return msg['MSH']['MSH.10']['MSH.10.1']; });
 
-var ACCEPTED = { 'A01': 1, 'A04': 1, 'A08': 1 };
-if (!ACCEPTED[triggerEvent]) {
-    logger.warn('[ADT_Inbound] Ignoring unsupported trigger event ' + triggerEvent +
-                ' (control id ' + controlId + ')');
-    // Filtering here rather than erroring: an ADT feed carries many event types
-    // and a scribe has no business reacting to most of them. This is a normal
-    // outcome, not a failure.
-    channelMap.put('skip', true);
-    return;
+// Unsupported trigger events are rejected by the source FILTER
+// (adt_inbound.filter.js) before this transformer runs, so the message shows as
+// FILTERED in channel statistics rather than as an error. This check is only a
+// guard against the filter being edited out of the channel.
+var ACCEPTED = { 'A01': true, 'A04': true, 'A08': true };
+if (ACCEPTED[triggerEvent] !== true) {
+    throw new Error('ADT_Inbound transformer reached with unsupported event ' +
+                    triggerEvent + ' — the source filter should have rejected it');
 }
 
 // PID-3 is the patient identifier list. Real feeds put several identifier types
@@ -175,8 +174,8 @@ return;
             <successfulACKMessage></successfulACKMessage>
             <errorACKCode>AE</errorACKCode>
             <errorACKMessage>An error occurred processing the message.</errorACKMessage>
-            <rejectedACKCode>AR</rejectedACKCode>
-            <rejectedACKMessage>Message rejected.</rejectedACKMessage>
+            <rejectedACKCode>AA</rejectedACKCode>
+            <rejectedACKMessage></rejectedACKMessage>
             <dateFormat>yyyyMMddHHmmss.SSS</dateFormat>
           </responseGenerationProperties>
           <responseValidationProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2ResponseValidationProperties" version="4.4.2">
@@ -213,8 +212,8 @@ return;
             <successfulACKMessage></successfulACKMessage>
             <errorACKCode>AE</errorACKCode>
             <errorACKMessage>An error occurred processing the message.</errorACKMessage>
-            <rejectedACKCode>AR</rejectedACKCode>
-            <rejectedACKMessage>Message rejected.</rejectedACKMessage>
+            <rejectedACKCode>AA</rejectedACKCode>
+            <rejectedACKMessage></rejectedACKMessage>
             <dateFormat>yyyyMMddHHmmss.SSS</dateFormat>
           </responseGenerationProperties>
           <responseValidationProperties class="com.mirth.connect.plugins.datatypes.hl7v2.HL7v2ResponseValidationProperties" version="4.4.2">
@@ -228,7 +227,51 @@ return;
         </outboundProperties>
       </transformer>
     <filter version="4.4.2">
-      <elements/>
+      <elements>
+        <com.mirth.connect.plugins.javascriptrule.JavaScriptRule version="4.4.2">
+          <name>Accept only handled trigger events</name>
+          <sequenceNumber>0</sequenceNumber>
+          <enabled>true</enabled>
+          <operator>NONE</operator>
+          <script>/**
+ * ADT_Inbound source FILTER — accept only the trigger events this channel handles.
+ *
+ * A registration feed carries dozens of event types (transfers, discharges,
+ * bed swaps, merges) and a scribe has no business reacting to most of them.
+ * Rejecting them here, in a filter rule, is what makes Mirth mark the message
+ * FILTERED on the dashboard and in channel statistics — a normal outcome an
+ * integration analyst expects to see counted, not an ERROR against the channel.
+ *
+ * Doing this in the transformer instead (setting a flag and returning) does not
+ * stop the destination from firing: the HTTP sender would POST an empty body
+ * and the message would be recorded as an error. That was the original
+ * implementation, and the channel statistics proved it wrong.
+ *
+ * The sender still receives an ACK (MSA-1 = AA): a filtered message was
+ * received and understood, it simply is not ours to act on.
+ */
+
+var ACCEPTED = { 'A01': true, 'A04': true, 'A08': true };
+
+var triggerEvent = '';
+try {
+    triggerEvent = String(msg['MSH']['MSH.9']['MSH.9.2']);
+} catch (e) {
+    logger.warn('[ADT_Inbound] Could not read MSH-9.2: ' + e);
+}
+
+if (ACCEPTED[triggerEvent] === true) {
+    return true;
+}
+
+var controlId = '';
+try { controlId = String(msg['MSH']['MSH.10']['MSH.10.1']); } catch (e) {}
+logger.info('[ADT_Inbound] Filtered unsupported trigger event ' + triggerEvent +
+            ' (control id ' + controlId + ')');
+return false;
+</script>
+        </com.mirth.connect.plugins.javascriptrule.JavaScriptRule>
+      </elements>
     </filter>
     <transportName>TCP Listener</transportName>
     <mode>SOURCE</mode>

@@ -85,6 +85,17 @@ def build_charge_bundle(session: dict, icd10_codes: list[str], cpt_code: str,
     if not session_id:
         raise ValueError('session.id is required to build a charge bundle')
 
+    # A charge may only be CONFIRMED against an approved note. The provider
+    # attests to the documentation first; billing what that documentation
+    # supports comes after. Enforced here rather than only in the route so a
+    # future caller — a batch job, a CLI — cannot bypass it. Suggestions are
+    # allowed earlier so the level can be reviewed alongside the note.
+    if confirmed_by and session.get('status') != 'approved':
+        raise ValueError(
+            f'session {session_id} has status {session.get("status")!r}; a charge '
+            'can only be confirmed against an approved note'
+        )
+
     procedure = lookup_cpt(cpt_code)
     if not procedure:
         raise ValueError(

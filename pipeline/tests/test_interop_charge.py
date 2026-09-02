@@ -18,6 +18,7 @@ from interop.charge import build_charge_bundle  # noqa: E402
 
 SESSION = {
     'id': 'sess-test-001',
+    'status': 'approved',
     'patient_mrn': 'MRN000111',
     'provider_npi': '1234567893',
     'approved_at': '2026-09-01 14:31:00',
@@ -63,6 +64,20 @@ def test_confirmed_charge_is_billable_and_records_the_enterer():
     assert charge.status == 'billable'
     # Someone must be recorded as having taken responsibility for the level.
     assert charge.enterer is not None
+
+
+def test_cannot_confirm_a_charge_against_an_unapproved_note():
+    """Billing follows attestation. A note still in review cannot be billed."""
+    unapproved = dict(SESSION, status='review')
+    with pytest.raises(ValueError, match='only be confirmed against an approved note'):
+        build_charge_bundle(unapproved, ['J02.9'], '99213', confirmed_by='dr-smith')
+
+
+def test_suggestion_is_allowed_before_approval():
+    """A suggestion is not a bill; reviewing it alongside the note is the point."""
+    in_review = dict(SESSION, status='review')
+    bundle = build_charge_bundle(in_review, ['J02.9'], '99213', confirmed_by=None)
+    assert _resources(bundle, 'ChargeItem')[0].status == 'planned'
 
 
 def test_charge_id_is_stable_across_rebuilds():

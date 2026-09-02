@@ -32,6 +32,14 @@ SB, EB, CR = b'\x0b', b'\x1c', b'\x0d'
 DEFAULT_NPI = '1234567893'
 
 
+def xcn(id_number: str, family: str, given: str, identifier_type: str) -> str:
+    """XCN, HL7 v2.5 §2.A.89. Component 9 is Assigning Authority; component 13
+    is Identifier Type Code. Built by index so 'NPI' lands in 13, not 9."""
+    c = [''] * 13
+    c[0], c[1], c[2], c[12] = id_number, family, given, identifier_type
+    return '^'.join(c)
+
+
 def build_adt(mrn: str, event: str, family: str, given: str, birth_date: str,
               sex: str, patient_class: str, npi: str, facility: str) -> str:
     now = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d%H%M%S')
@@ -57,7 +65,7 @@ def build_adt(mrn: str, event: str, family: str, given: str, birth_date: str,
     pv1[1] = '1'                                    # PV1-1  Set ID
     pv1[2] = patient_class                          # PV1-2  Patient Class (0004)
     pv1[3] = f'CLINIC^^^{facility}'                 # PV1-3  Assigned Location
-    pv1[7] = f'{npi}^SMITH^ALAN^^^^^^NPI'           # PV1-7  Attending Doctor
+    pv1[7] = xcn(npi, 'SMITH', 'ALAN', 'NPI')       # PV1-7  Attending Doctor
     pv1[19] = f'V{random.randint(100000, 999999)}'  # PV1-19 Visit Number
     segments.append('|'.join(pv1))
 

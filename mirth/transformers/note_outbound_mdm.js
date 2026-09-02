@@ -153,6 +153,21 @@ function httpHeader(name) {
     return (direct === null || direct === undefined) ? '' : String(direct);
 }
 
+/**
+ * XCN — extended composite ID number and name (HL7 v2.5 §2.A.89).
+ * Component 9 is Assigning Authority; component 13 is Identifier Type Code.
+ * Building by index avoids the caret-counting error that put 'NPI' in the
+ * assigning-authority slot in an earlier version of this file.
+ */
+function xcn(id, family, given, identifierType) {
+    var c = [];
+    c[0]  = id || '';
+    c[1]  = family || '';
+    c[2]  = given || '';
+    c[12] = identifierType || '';
+    return c.join(COMP);            // holes join as empty components
+}
+
 // ---------------------------------------------------------------------------
 
 var SENDING_APP  = globalMap.get('HISCRIBE_APP')      || 'HISCRIBE';
@@ -227,7 +242,7 @@ segments.push([
 ].join(FIELD));
 
 segments.push([
-    'PV1', '1', patientClass, '', '', '', '', esc(npi) + '^^^^^^^^NPI'
+    'PV1', '1', patientClass, '', '', '', '', xcn(esc(npi), '', '', 'NPI')
 ].join(FIELD));
 
 // TXA — Transcription Document Header. Field positions are 1-based, so index 0

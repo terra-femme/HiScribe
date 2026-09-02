@@ -124,6 +124,31 @@ def test_outbound_channels_return_the_downstream_ack():
         assert 'responseMap.get' in (root.findtext('postprocessingScript') or '')
 
 
+def test_adt_inbound_filters_rather_than_errors():
+    """Unsupported ADT events must be FILTERED, not dispatched with an empty
+    body and recorded as errors — which is what the first version did."""
+    root = _tree(os.path.join(CHANNEL_DIR, 'ADT_Inbound.xml'))
+    rule = root.find('sourceConnector/filter/elements/'
+                     'com.mirth.connect.plugins.javascriptrule.JavaScriptRule')
+    assert rule is not None, 'ADT_Inbound has no source filter rule'
+    assert 'return false' in (rule.findtext('script') or '')
+    # A filtered ADT event is acknowledged AA, not AR: the upstream engine must
+    # not retry an event this channel deliberately ignores.
+    code = root.findtext('sourceConnector/transformer/inboundProperties/'
+                         'responseGenerationProperties/rejectedACKCode')
+    assert code == 'AA', f'ADT_Inbound answers filtered messages with {code}, expected AA'
+
+
+def test_xcn_identifier_type_is_component_13():
+    """'NPI' belongs in XCN-13 (Identifier Type Code), not XCN-9 (Assigning
+    Authority). Eight carets put it in 9; that was an earlier defect."""
+    for name in ('Note_Outbound', 'Charge_Outbound'):
+        with open(os.path.join(CHANNEL_DIR, f'{name}.xml'), encoding='utf-8') as fh:
+            xml = fh.read()
+        assert "'^^^^^^^^NPI'" not in xml, f'{name} still places NPI in XCN-9'
+        assert 'c[12] = identifierType' in xml, f'{name} lacks the by-index XCN builder'
+
+
 def test_transformers_are_inlined():
     """The mapping logic must actually reach the channel, not just exist on disk."""
     for name, marker in (('Note_Outbound', 'MDM^T02'),

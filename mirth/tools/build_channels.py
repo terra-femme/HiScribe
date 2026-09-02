@@ -42,11 +42,17 @@ DEFAULT_RESOURCE = (
 )
 
 
-def _hl7_datatype(tag: str) -> str:
+def _hl7_datatype(tag: str, filtered_ack: str = 'AR') -> str:
     """The HL7 v2 data type block.
 
     Every nested properties object must be present. A null `serializationProperties`
     imports cleanly and then throws NullPointerException at deploy time.
+
+    `filtered_ack` is the MSA-1 code Mirth returns for a message a filter rule
+    rejected — it reuses the "rejected" slot for that. The default AR
+    (Application Reject) is wrong for an inbound feed that deliberately ignores
+    most event types: an upstream engine reads AR as "retry or alarm". AA says
+    what is true — received and understood, not ours to act on.
     """
     p = 'com.mirth.connect.plugins.datatypes.hl7v2'
     return f'''<{tag} class="{p}.HL7v2DataTypeProperties" version="{V}">
@@ -74,8 +80,8 @@ def _hl7_datatype(tag: str) -> str:
             <successfulACKMessage></successfulACKMessage>
             <errorACKCode>AE</errorACKCode>
             <errorACKMessage>An error occurred processing the message.</errorACKMessage>
-            <rejectedACKCode>AR</rejectedACKCode>
-            <rejectedACKMessage>Message rejected.</rejectedACKMessage>
+            <rejectedACKCode>{filtered_ack}</rejectedACKCode>
+            <rejectedACKMessage>{'' if filtered_ack == 'AA' else 'Message rejected.'}</rejectedACKMessage>
             <dateFormat>yyyyMMddHHmmss.SSS</dateFormat>
           </responseGenerationProperties>
           <responseValidationProperties class="{p}.HL7v2ResponseValidationProperties" version="{V}">
@@ -99,12 +105,39 @@ def _raw_datatype(tag: str) -> str:
         </{tag}>'''
 
 
-def _datatype(kind: str, tag: str) -> str:
-    return _hl7_datatype(tag) if kind == 'HL7V2' else _raw_datatype(tag)
+def _datatype(kind: str, tag: str, filtered_ack: str = 'AR') -> str:
+    return _hl7_datatype(tag, filtered_ack) if kind == 'HL7V2' else _raw_datatype(tag)
+
+
+def _filter(script_file: str | None) -> str:
+    """A source filter, optionally carrying one JavaScript rule.
+
+    A rule returning false marks the message FILTERED — counted as such in
+    channel statistics and never dispatched. That is the correct outcome for an
+    event the channel does not handle; a transformer cannot achieve it.
+    """
+    if not script_file:
+        return f'''<filter version="{V}">
+      <elements/>
+    </filter>'''
+    path = os.path.join(TRANSFORMER_DIR, script_file)
+    with open(path, encoding='utf-8') as f:
+        script = f.read()
+    return f'''<filter version="{V}">
+      <elements>
+        <com.mirth.connect.plugins.javascriptrule.JavaScriptRule version="{V}">
+          <name>Accept only handled trigger events</name>
+          <sequenceNumber>0</sequenceNumber>
+          <enabled>true</enabled>
+          <operator>NONE</operator>
+          <script>{saxutils.escape(script)}</script>
+        </com.mirth.connect.plugins.javascriptrule.JavaScriptRule>
+      </elements>
+    </filter>'''
 
 
 def _transformer(inbound: str, outbound: str, script_file: str | None,
-                 step_name: str = 'Transform') -> str:
+                 step_name: str = 'Transform', filtered_ack: str = 'AR') -> str:
     """A transformer, optionally carrying one JavaScript step."""
     if script_file:
         path = os.path.join(TRANSFORMER_DIR, script_file)
@@ -124,8 +157,8 @@ def _transformer(inbound: str, outbound: str, script_file: str | None,
         {elements}
         <inboundDataType>{inbound}</inboundDataType>
         <outboundDataType>{outbound}</outboundDataType>
-        {_datatype(inbound, 'inboundProperties')}
-        {_datatype(outbound, 'outboundProperties')}
+        {_datatype(inbound, 'inboundProperties', filtered_ack)}
+        {_datatype(outbound, 'outboundProperties', filtered_ack)}
       </transformer>'''
 
 
@@ -332,7 +365,8 @@ def http_sender(url: str, method: str, content: str, content_type: str) -> tuple
 def build_channel(cid, name, description, source, dest, *,
                   source_kinds=('HL7V2', 'HL7V2'),
                   dest_kinds=('HL7V2', 'HL7V2'),
-                  source_script=None, source_step='Transform',
+                  source_script=None, source_step='Transform', source_filter=None,
+                  filtered_ack='AR',
                   dest_name='destination', response_kind='HL7V2',
                   postprocessor='return;') -> str:
     src_props, src_transport = source
@@ -347,10 +381,8 @@ def build_channel(cid, name, description, source, dest, *,
     <metaDataId>0</metaDataId>
     <name>sourceConnector</name>
     {src_props}
-    {_transformer(source_kinds[0], source_kinds[1], source_script, source_step)}
-    <filter version="{V}">
-      <elements/>
-    </filter>
+    {_transformer(source_kinds[0], source_kinds[1], source_script, source_step, filtered_ack)}
+    {_filter(source_filter)}
     <transportName>{src_transport}</transportName>
     <mode>SOURCE</mode>
     <enabled>true</enabled>
@@ -479,6 +511,9 @@ CHANNELS = [
             'Mapping logic: mirth/transformers/adt_inbound.js\n\n' + SIM_NOTICE
         ),
         source=lambda: mllp_listener(6661, 'Auto-generate (After source transformer)'),
+        source_filter='adt_inbound.filter.js',
+        # Filtered events are acknowledged AA: received, not ours. See _hl7_datatype.
+        filtered_ack='AA',
         source_script='adt_inbound.js',
         source_step='Parse PID/PV1 to patient context',
         dest=lambda: http_sender(

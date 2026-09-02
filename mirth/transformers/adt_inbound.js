@@ -29,15 +29,14 @@ function get(path) {
 var triggerEvent = get(function () { return msg['MSH']['MSH.9']['MSH.9.2']; });
 var controlId    = get(function () { return msg['MSH']['MSH.10']['MSH.10.1']; });
 
-var ACCEPTED = { 'A01': 1, 'A04': 1, 'A08': 1 };
-if (!ACCEPTED[triggerEvent]) {
-    logger.warn('[ADT_Inbound] Ignoring unsupported trigger event ' + triggerEvent +
-                ' (control id ' + controlId + ')');
-    // Filtering here rather than erroring: an ADT feed carries many event types
-    // and a scribe has no business reacting to most of them. This is a normal
-    // outcome, not a failure.
-    channelMap.put('skip', true);
-    return;
+// Unsupported trigger events are rejected by the source FILTER
+// (adt_inbound.filter.js) before this transformer runs, so the message shows as
+// FILTERED in channel statistics rather than as an error. This check is only a
+// guard against the filter being edited out of the channel.
+var ACCEPTED = { 'A01': true, 'A04': true, 'A08': true };
+if (ACCEPTED[triggerEvent] !== true) {
+    throw new Error('ADT_Inbound transformer reached with unsupported event ' +
+                    triggerEvent + ' — the source filter should have rejected it');
 }
 
 // PID-3 is the patient identifier list. Real feeds put several identifier types

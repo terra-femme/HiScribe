@@ -19,7 +19,8 @@ HiScribe eliminates the typing entirely:
 2. HiScribe listens, transcribes, and separates the voices
 3. A 6-node ML pipeline maps the transcript to a SOAP note
 4. The provider reviews, corrects if needed, and approves in under 90 seconds
-5. A FHIR-compliant document is generated with a sealed audit trail
+5. A FHIR R4B document is generated, delivered to an interface engine as
+   HL7 v2 MDM^T02, and sealed with an audit trail
 
 ---
 
@@ -96,7 +97,10 @@ Provider Review Screen (SOAPReview.tsx)
         ▼
 Provider clicks Approve
         │  POST /session/:id/approve
-        │  FHIR Composition JSON generated
+        │  FHIR R4B transaction Bundle built (Composition + Patient,
+        │    Practitioner, Encounter) and stored in fhir_bundles
+        │  POSTed to Mirth Note_Outbound, mapped to HL7 v2.5 MDM^T02,
+        │    delivered over MLLP; the downstream ACK is returned
         │  Audit trail finalized and sealed
         └── Stored to SQLite
 ```
@@ -165,7 +169,10 @@ The audit log is **append-only** — no UPDATE or DELETE ever runs on it. Every 
 | `segment_deleted` | Provider removes a segment |
 | `amendment_added` | Provider adds clinical info not in the transcript |
 | `session_approved` | Provider clicks Approve |
-| `fhir_generated` | FHIR document created post-approval |
+| `fhir_generated` | FHIR bundle built and handed to the sink post-approval |
+| `patient_context_received` | Demographics accepted from an inbound ADT message |
+| `charge_suggested` | An E/M level was proposed — never billable on its own |
+| `charge_confirmed` | A provider took responsibility for the level; only now billable |
 
 ### Edit vs Amendment — Legal Distinction
 
@@ -410,7 +417,9 @@ Training data comes from the audit log:
 |-----|---------------------------|
 | HIPAA compliance | Signed BAA with Gladia + OpenAI, or swap to Azure (HIPAA-eligible) |
 | Authentication | JWT is scaffolded — needs real identity provider |
-| EHR integration | FHIR output is generated but not delivered — needs HL7 FHIR server or EHR API |
+| EHR integration | FHIR R4B and HL7 v2 flow end to end against a **simulated** EHR and PM system via Mirth Connect (see [`mirth/README.md`](mirth/README.md)). Pointing at a real vendor EHR needs that vendor's interface spec, an interface engineer on their side, and conformance testing — none of which is simulated here |
+| Terminology verification | The ICD-10 to SNOMED crosswalk and four code-system URIs are marked `TODO VERIFY` and log warnings on use — they must be checked against CMS and the NLM before any non-demo use |
+| FHIR validation | Bundles are built with `fhir.resources` R4B models but have not been run through an external validator such as a HAPI test server |
 | pyannote on long sessions | Model accuracy degrades past ~45 minutes — chunk or upgrade |
 | SQLite at scale | Single-file DB works for demo — swap to Cosmos DB or Postgres for multi-provider |
 | ML model cold start | Both models load lazily on first inference — add warmup on server boot |

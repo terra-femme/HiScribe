@@ -17,6 +17,15 @@ services:
     ports:
       - '8000:8000'
     env_file: .env
+    environment:
+      # Inside the compose network Mirth is reachable by service name. The
+      # trailing slash matters — Mirth 302-redirects a context path without it
+      # and a redirected POST arrives with no body.
+      MIRTH_NOTE_URL: http://mirth:8081/note/
+      MIRTH_CHARGE_URL: http://mirth:8082/charge/
+    depends_on:
+      mirth:
+        condition: service_healthy
     volumes:
       - ./data:/app/data
       - ./schema.sql:/app/schema.sql
@@ -28,3 +37,38 @@ services:
       - '8080:8080'
     depends_on:
       - gateway
+
+  # Interface engine. Pinned to 4.4.x deliberately: NextGen relicensed away from
+  # the Mozilla Public License at 4.5, and an ambiguously licensed image does not
+  # belong in a portfolio repository.
+  #
+  # Channels are NOT baked into the image. Import them after the container is
+  # healthy with:
+  #     python mirth/tools/build_channels.py
+  #     python mirth/tools/deploy_channels.py
+  mirth:
+    image: nextgenhealthcare/connect:4.4.2
+    ports:
+      - '8443:8443'   # administrator / REST API (https)
+      - '6661:6661'   # ADT_Inbound      MLLP listener
+      - '6662:6662'   # EHR_Mock         MLLP listener
+      - '6663:6663'   # PM_Mock          MLLP listener
+      - '8081:8081'   # Note_Outbound    HTTP listener  POST /note/
+      - '8082:8082'   # Charge_Outbound  HTTP listener  POST /charge/
+    environment:
+      # Derby keeps the whole engine self-contained. A real deployment would
+      # point this at Postgres; nothing in the channels depends on the choice.
+      DATABASE: derby
+      KEYSTORE_STOREPASS: ${MIRTH_KEYSTORE_PASS:-changeit}
+      KEYSTORE_KEYPASS: ${MIRTH_KEYSTORE_PASS:-changeit}
+    volumes:
+      # Where EHR_Mock and PM_Mock write the messages they receive, so the
+      # results of a run are visible from the host.
+      - ./data/mirth/ehr_inbox:/opt/connect/appdata/ehr_inbox
+      - ./data/mirth/pm_inbox:/opt/connect/appdata/pm_inbox
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsk https://localhost:8443/api/server/version -H 'X-Requested-With: healthcheck' -u admin:admin || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 90s

@@ -10,9 +10,15 @@ from pydantic import BaseModel
 from db.enrollment import delete_enrollment, get_active_enrollments, save_enrollment
 from db.sqlite import (add_amendment, approve_session, delete_segment,
                        edit_segment, get_review_payload, init_db,
-                       remap_segment)
+                       remap_segment, save_charge, save_fhir_bundle,
+                       get_patient_context, save_patient_context)
 from graph.pipeline import run_pipeline
 from adapters.enrollment_embedding import build_enrollment_profile, encrypt_embedding
+from interop.builder import build_bundle
+from interop.logsafe import scrub
+from interop.charge import build_charge_bundle
+from interop.client import send_bundle
+from interop.charge_client import send_charge
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +73,54 @@ class ApproveRequest(BaseModel):
 @app.post('/session/{session_id}/approve')
 def approve(session_id: str, req: ApproveRequest):
     approve_session(session_id, req.provider_npi, req.patient_mrn, req.visit_type)
-    return {'status': 'approved', 'session_id': session_id}
+
+    # FHIR emission is deliberately non-fatal. The provider has already
+    # approved the note and the approval is committed; a serialisation or
+    # delivery failure must not undo that or surface as a failed approval.
+    # The bundle is derived state and can always be rebuilt from the DB.
+    fhir: dict = {'status': 'skipped', 'detail': None}
+    try:
+        payload = get_review_payload(session_id)
+        if not payload:
+            logger.error(
+                '[approve] No review payload for session=%s — FHIR skipped',
+                scrub(session_id)
+            )
+            fhir = {'status': 'error', 'detail': 'review payload not found'}
+        else:
+            bundle_json = build_bundle(payload).model_dump_json(exclude_none=True)
+            result = send_bundle(session_id, bundle_json)
+            save_fhir_bundle(
+                session_id,
+                bundle_json,
+                destination=result.get('destination'),
+                status=result.get('status', 'generated'),
+            )
+            # On success the sink's detail is the downstream ACK code, which is
+            # safe and useful to return. On failure it can hold a transport
+            # exception string, so that path reports only that delivery failed
+            # — the detail is already in the log above.
+            delivered = result.get('status') in ('sent', 'written')
+            fhir = {
+                'status': result.get('status'),
+                'detail': result.get('detail') if delivered else 'delivery failed; see server logs',
+            }
+            logger.info(
+                '[approve] FHIR bundle emitted session=%s status=%s dest=%s',
+                scrub(session_id), scrub(fhir['status']), scrub(result.get('destination'))
+            )
+    except Exception as exc:
+        logger.error(
+            '[approve] FHIR generation FAILED session=%s: %s — approval stands, '
+            'bundle can be re-emitted', scrub(session_id), scrub(exc), exc_info=True
+        )
+        # The exception is logged above in full. The caller gets a stable
+        # marker: the approval succeeded, the bundle did not go out, and it can
+        # be re-emitted. Echoing exception text here would leak internals to
+        # whatever called the approve endpoint.
+        fhir = {'status': 'error', 'detail': 'FHIR generation failed; see server logs'}
+
+    return {'status': 'approved', 'session_id': session_id, 'fhir': fhir}
 
 
 class RemapRequest(BaseModel):
@@ -179,3 +232,154 @@ def remove_enrollment(provider_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail=f'Provider {provider_id!r} not found')
     return {'status': 'deleted', 'provider_id': provider_id}
+
+
+# ── Interop: inbound ADT ─────────────────────────────────────────────────────
+
+class PatientContext(BaseModel):
+    """Patient context posted by the Mirth ADT_Inbound channel.
+
+    Field names mirror the JSON that `mirth/transformers/adt_inbound.js`
+    produces. Everything except `mrn` is optional because a real ADT feed is
+    inconsistent about what it populates, and rejecting a whole message for a
+    missing middle name would be worse than storing what did arrive.
+    """
+    mrn: str
+    assigningAuthority: str | None = None
+    familyName: str | None = None
+    givenName: str | None = None
+    birthDate: str | None = None
+    administrativeSex: str | None = None
+    patientClass: str | None = None
+    attendingNpi: str | None = None
+    visitNumber: str | None = None
+    triggerEvent: str | None = None
+    messageControlId: str | None = None
+
+
+@app.post('/fhir/patient-context')
+def receive_patient_context(ctx: PatientContext):
+    """Accept patient demographics derived from an inbound ADT message.
+
+    Called by Mirth, not by a browser. Returning 4xx here makes the ADT_Inbound
+    channel record an error, which is the correct behaviour: a demographic
+    update that could not be stored must not be silently acknowledged.
+    """
+    logger.info(
+        '[patient-context] %s mrn=%s class=%s control=%s',
+        scrub(ctx.triggerEvent), scrub(ctx.mrn), scrub(ctx.patientClass),
+        scrub(ctx.messageControlId)
+    )
+    try:
+        save_patient_context(ctx.model_dump())
+    except ValueError as exc:
+        # The message is logged in full but not returned. Echoing an exception
+        # string to a caller leaks internal structure, and this endpoint is
+        # reachable by anything that can talk to the interface engine.
+        logger.error('[patient-context] Rejected: %s', scrub(exc))
+        raise HTTPException(status_code=400,
+                            detail='patient context rejected: missing or invalid MRN')
+    except Exception as exc:
+        logger.error('[patient-context] FAILED to store mrn=%s: %s',
+                     scrub(ctx.mrn), scrub(exc), exc_info=True)
+        raise HTTPException(status_code=500, detail='could not store patient context')
+    return {'status': 'stored', 'mrn': ctx.mrn}
+
+
+@app.get('/fhir/patient-context/{mrn}')
+def read_patient_context(mrn: str):
+    context = get_patient_context(mrn)
+    if not context:
+        raise HTTPException(status_code=404, detail=f'No patient context for MRN {mrn!r}')
+    return context
+
+
+# ── Interop: coded charge capture ────────────────────────────────────────────
+
+# Returned instead of the exception text. The reasons a charge is refused
+# (unmapped diagnosis, unconfigured CPT) are actionable to an operator reading
+# the log, not to an arbitrary caller.
+_CHARGE_REJECTED = ('charge rejected: the session is not approved, the diagnosis '
+                    'could not be mapped to ICD-10-CM, or the CPT code is not '
+                    'configured')
+
+
+class ChargeRequest(BaseModel):
+    cpt_code: str
+    icd10_codes: list[str]
+    # Present only on confirmation. Its absence is what keeps a charge planned.
+    confirmed_by: str | None = None
+
+
+@app.post('/session/{session_id}/charge/suggest')
+def suggest_charge(session_id: str, req: ChargeRequest):
+    """Record a proposed charge. Never billable, never sent downstream.
+
+    The provider is the accountable party for an E/M level. This endpoint exists
+    so a suggestion is captured and auditable, not so it can be billed.
+    """
+    payload = get_review_payload(session_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail=f'Unknown session {session_id!r}')
+    try:
+        bundle = build_charge_bundle(
+            payload['session'], req.icd10_codes, req.cpt_code, confirmed_by=None
+        )
+    except ValueError as exc:
+        logger.error('[charge.suggest] session=%s rejected: %s',
+                     scrub(session_id), scrub(exc))
+        raise HTTPException(status_code=400, detail=_CHARGE_REJECTED)
+
+    save_charge(session_id, req.cpt_code, req.icd10_codes, status='planned')
+    logger.info('[charge.suggest] session=%s cpt=%s icd10=%s (NOT billable)',
+                scrub(session_id), scrub(req.cpt_code), scrub(req.icd10_codes))
+    return {'status': 'planned', 'session_id': session_id,
+            'bundle': bundle.model_dump(exclude_none=True)}
+
+
+@app.post('/session/{session_id}/charge/confirm')
+def confirm_charge(session_id: str, req: ChargeRequest):
+    """Provider confirms the charge; only now is it billable and posted.
+
+    `confirmed_by` is required. Without it there is no accountable author for a
+    billing determination, and the charge stays planned.
+    """
+    if not req.confirmed_by:
+        raise HTTPException(
+            status_code=400,
+            detail='confirmed_by is required — a charge cannot be billed without '
+                   'an identified provider taking responsibility for the level'
+        )
+    payload = get_review_payload(session_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail=f'Unknown session {session_id!r}')
+
+    try:
+        bundle = build_charge_bundle(
+            payload['session'], req.icd10_codes, req.cpt_code,
+            confirmed_by=req.confirmed_by
+        )
+    except ValueError as exc:
+        logger.error('[charge.confirm] session=%s rejected: %s',
+                     scrub(session_id), scrub(exc))
+        raise HTTPException(status_code=400, detail=_CHARGE_REJECTED)
+
+    bundle_json = bundle.model_dump_json(exclude_none=True)
+    # Delivery is non-fatal for the same reason note emission is: the provider's
+    # confirmation is a recorded fact, and a billing system being unreachable
+    # must not erase it. The charge is persisted and can be re-posted.
+    result = send_charge(session_id, bundle_json)
+    save_charge(session_id, req.cpt_code, req.icd10_codes, status='billable',
+                confirmed_by=req.confirmed_by, bundle_json=bundle_json,
+                destination=result.get('destination'))
+
+    logger.info('[charge.confirm] session=%s cpt=%s by=%s delivery=%s',
+                scrub(session_id), scrub(req.cpt_code), scrub(req.confirmed_by),
+                scrub(result.get('status')))
+    # `result` carries a `detail` field that can hold a transport error string
+    # from the sink. Report the outcome and destination; the detail stays in the
+    # log rather than travelling back to the caller.
+    return {'status': 'billable', 'session_id': session_id,
+            'confirmed_by': req.confirmed_by,
+            'delivery': {'status': result.get('status'),
+                         'destination': result.get('destination')}}

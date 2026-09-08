@@ -41,3 +41,10 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# CPT is AMA-licensed; descriptors must never be committed.
+# See pipeline/interop/cpt_config.py
+config/cpt_codes.json
+
+# Local agent/editor tool settings — machine-specific paths, not project config
+.claude/

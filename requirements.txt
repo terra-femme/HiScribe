@@ -11,5 +11,10 @@ librosa==0.10.2
 soundfile==0.12.1
 httpx==0.27.0
 pydantic==2.11.0
+# FHIR R4B resource models. Verified 2026-08-10 to install and run on
+# Python 3.13 against the pydantic pin above.
+fhir.resources==8.3.0
+# Hardened XML parsing for the Mirth tooling, which reads XML off the network.
+defusedxml==0.7.1
 cryptography>=42.0.0
 python-multipart==0.0.9
